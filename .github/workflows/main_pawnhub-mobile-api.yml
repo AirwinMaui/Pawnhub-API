@@ -35,8 +35,8 @@ jobs:
         with:
           name: php-app
           path: .
-
-  deploy:
+          
+   deploy:
     runs-on: ubuntu-latest
     needs: build
     permissions:
@@ -59,8 +59,7 @@ jobs:
       - name: Prepare deployment package
         run: |
           mkdir deploy
-          cp -r api/* deploy/
-          cp db.php deploy/
+          cp *.php deploy/ || true
           if [ -d "certs" ]; then
             mkdir -p deploy/certs
             cp -r certs/* deploy/certs/
