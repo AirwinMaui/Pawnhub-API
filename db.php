@@ -1,8 +1,8 @@
 <?php
-define('DB_HOST', getenv('DB_HOST'));
-define('DB_USER', getenv('DB_USER'));
-define('DB_PASS', getenv('DB_PASS'));
-define('DB_NAME', getenv('DB_NAME'));
+define('DB_HOST', getenv('DB_HOST') ?: 'pawnhub.mysql.database.azure.com');
+define('DB_USER', getenv('DB_USER') ?: 'PawnhubAdmin');
+define('DB_PASS', getenv('DB_PASS') ?: 'Admin123');
+define('DB_NAME', getenv('DB_NAME') ?: 'pawnhub');
 define('DB_PORT', getenv('DB_PORT') ?: '3306');
 
 $ssl_cert = __DIR__ . '/certs/DigiCertGlobalRootG2.crt.pem';
@@ -12,10 +12,12 @@ try {
         throw new Exception('SSL certificate file not found: ' . $ssl_cert);
     }
 
-    $dsn = 'mysql:host=' . DB_HOST .
-           ';port=' . DB_PORT .
-           ';dbname=' . DB_NAME .
-           ';charset=utf8mb4';
+    $dsn = sprintf(
+        'mysql:host=%s;port=%s;dbname=%s;charset=utf8mb4',
+        DB_HOST,
+        DB_PORT,
+        DB_NAME
+    );
 
     $pdo = new PDO(
         $dsn,
