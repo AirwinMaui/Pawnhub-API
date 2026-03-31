@@ -1,5 +1,12 @@
 <?php
-require __DIR__ . '/../db.php';
+header('Content-Type: text/plain');
 
-$stmt = $pdo->query("SELECT 1");
-echo "DB connected!";
+require __DIR__ . '/db.php';
+
+try {
+    $stmt = $pdo->query("SELECT 1");
+    echo "DB connected!";
+} catch (Throwable $e) {
+    http_response_code(500);
+    echo "DB error: " . $e->getMessage();
+}
