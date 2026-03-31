@@ -17,8 +17,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     ]);
     exit;
 }
-
-require __DIR__ . '/../db.php';
+require __DIR__ . '/db.php';
 
 try {
     $raw = file_get_contents('php://input');
