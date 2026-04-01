@@ -14,24 +14,13 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function getTenantId(): ?int
-{
-    if (isset($_GET["tenant"]) && is_numeric($_GET["tenant"])) {
-        return (int) $_GET["tenant"];
-    }
-
-    if (isset($_GET["tenant_id"]) && is_numeric($_GET["tenant_id"])) {
-        return (int) $_GET["tenant_id"];
-    }
-
-    return null;
-}
-
 function fullImageUrl(string $path, string $baseUrl): string
 {
     $path = trim($path);
 
-    if ($path === '') return '';
+    if ($path === '') {
+        return '';
+    }
 
     if (preg_match('/^https?:\/\//i', $path)) {
         return $path;
@@ -47,19 +36,16 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
     ]);
 }
 
-$tenantId = getTenantId();
-
-if (!$tenantId || $tenantId <= 0) {
-    respond(400, [
-        "success" => false,
-        "message" => "Missing or invalid tenant."
-    ]);
-}
-
 $imageBaseUrl = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
 
+/*
+|--------------------------------------------------------------------------
+| TEMPORARY: hardcode tenant for testing
+|--------------------------------------------------------------------------
+*/
+$tenantId = 1;
+
 try {
-    // Check tenant
     $stmt = $pdo->prepare("
         SELECT id, name, status
         FROM tenants
@@ -76,14 +62,13 @@ try {
         ]);
     }
 
-    if (isset($tenant["status"]) && strtolower($tenant["status"]) !== "active") {
+    if (isset($tenant["status"]) && strtolower((string)$tenant["status"]) !== "active") {
         respond(403, [
             "success" => false,
             "message" => "Tenant inactive."
         ]);
     }
 
-    // Get products
     $stmt = $pdo->prepare("
         SELECT
             id,
@@ -107,7 +92,7 @@ try {
             "name" => $row["item_name"],
             "category" => $row["item_category"],
             "price" => "$" . number_format((float)$row["appraisal_value"], 2),
-            "image" => fullImageUrl($row["item_photo_path"] ?? "", $imageBaseUrl),
+            "image" => fullImageUrl((string)($row["item_photo_path"] ?? ""), $imageBaseUrl),
         ];
     }
 
@@ -119,7 +104,6 @@ try {
         ],
         "products" => $products,
     ]);
-
 } catch (Throwable $e) {
     respond(500, [
         "success" => false,
