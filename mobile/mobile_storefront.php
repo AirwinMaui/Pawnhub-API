@@ -19,17 +19,36 @@ function getTenantId(): ?int
     if (isset($_GET["tenant"]) && is_numeric($_GET["tenant"])) {
         return (int) $_GET["tenant"];
     }
-
-    if (isset($_GET["tenant_id"]) && is_numeric($_GET["tenant_id"])) {
-        return (int) $_GET["tenant_id"];
-    }
-
     return null;
 }
 
-$tenantId = getTenantId();
+if (!isset($pdo) || !($pdo instanceof PDO)) {
+    respond(500, ["success" => false, "message" => "PDO missing"]);
+}
 
-respond(200, [
-    "success" => true,
-    "tenant" => $tenantId
-]);
+$tenantId = getTenantId();
+if (!$tenantId) {
+    respond(400, ["success" => false, "message" => "Missing tenant"]);
+}
+
+try {
+    $stmt = $pdo->prepare("
+        SELECT id, name, status
+        FROM tenants
+        WHERE id = :tenant
+        LIMIT 1
+    ");
+    $stmt->execute(["tenant" => $tenantId]);
+    $tenant = $stmt->fetch();
+
+    respond(200, [
+        "success" => true,
+        "tenant" => $tenant
+    ]);
+} catch (Throwable $e) {
+    respond(500, [
+        "success" => false,
+        "message" => "Tenant query failed",
+        "error" => $e->getMessage()
+    ]);
+}
