@@ -33,13 +33,21 @@ if (!$tenantId) {
 
 try {
     $stmt = $pdo->prepare("
-        SELECT id, name, status
+        SELECT id, business_name AS name, status
         FROM tenants
         WHERE id = :tenant
         LIMIT 1
     ");
     $stmt->execute(["tenant" => $tenantId]);
     $tenant = $stmt->fetch();
+
+    if (!$tenant) {
+        respond(200, [
+            "success" => false,
+            "message" => "Tenant not found",
+            "tenant_passed" => $tenantId
+        ]);
+    }
 
     respond(200, [
         "success" => true,
