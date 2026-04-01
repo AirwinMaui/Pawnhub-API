@@ -14,11 +14,23 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-/*
-|--------------------------------------------------------------------------
-| Helpers
-|--------------------------------------------------------------------------
-*/
+set_exception_handler(function ($e) {
+    respond(500, [
+        "success" => false,
+        "message" => "Unhandled exception",
+        "error" => $e->getMessage()
+    ]);
+});
+
+set_error_handler(function ($severity, $message, $file, $line) {
+    respond(500, [
+        "success" => false,
+        "message" => "PHP error",
+        "error" => $message,
+        "file" => basename($file),
+        "line" => $line
+    ]);
+});
 
 function getStringParam(string $key, string $default = ""): string
 {
@@ -27,7 +39,7 @@ function getStringParam(string $key, string $default = ""): string
 
 function getIntParam(string $key, ?int $default = null): ?int
 {
-    if (!isset($_GET[$key]) || $_GET[$key] === "") {
+    if (!isset($_GET[$key]) || $_GET[$key] === '') {
         return $default;
     }
 
@@ -35,14 +47,24 @@ function getIntParam(string $key, ?int $default = null): ?int
         return $default;
     }
 
-    return (int)$_GET[$key];
+    return (int) $_GET[$key];
 }
 
-/*
-|--------------------------------------------------------------------------
-| DB connection check
-|--------------------------------------------------------------------------
-*/
+function fullImageUrl(string $path, string $baseUrl): string
+{
+    $path = trim($path);
+
+    if ($path === '') {
+        return '';
+    }
+
+    if (preg_match('/^https?:\/\//i', $path)) {
+        return $path;
+    }
+
+    return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+}
+
 if (!isset($conn) || !($conn instanceof mysqli)) {
     respond(500, [
         "success" => false,
@@ -52,17 +74,9 @@ if (!isset($conn) || !($conn instanceof mysqli)) {
 
 $conn->set_charset("utf8mb4");
 
-/*
-|--------------------------------------------------------------------------
-| Tenant resolution
-|--------------------------------------------------------------------------
-| Best practice:
-| - resolve tenant_id from authenticated user/session/token
-| Temporary fallback here:
-| - allow tenant_id via query param during development
-*/
-$tenantId = getIntParam("tenant_id");
+$imageBaseUrl = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
 
+$tenantId = getIntParam("tenant_id");
 if (!$tenantId || $tenantId <= 0) {
     respond(400, [
         "success" => false,
@@ -70,17 +84,12 @@ if (!$tenantId || $tenantId <= 0) {
     ]);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Filters
-|--------------------------------------------------------------------------
-*/
 $search = getStringParam("search");
 $categoryId = getIntParam("category_id");
 
 /*
 |--------------------------------------------------------------------------
-| Validate tenant exists and is active
+| Validate tenant
 |--------------------------------------------------------------------------
 */
 $tenantSql = "SELECT id, name, status FROM tenants WHERE id = ? LIMIT 1";
@@ -89,12 +98,21 @@ $tenantStmt = $conn->prepare($tenantSql);
 if (!$tenantStmt) {
     respond(500, [
         "success" => false,
-        "message" => "Failed to prepare tenant query."
+        "message" => "Failed to prepare tenant query.",
+        "error" => $conn->error
     ]);
 }
 
 $tenantStmt->bind_param("i", $tenantId);
-$tenantStmt->execute();
+
+if (!$tenantStmt->execute()) {
+    respond(500, [
+        "success" => false,
+        "message" => "Failed to execute tenant query.",
+        "error" => $tenantStmt->error
+    ]);
+}
+
 $tenantResult = $tenantStmt->get_result();
 $tenant = $tenantResult->fetch_assoc();
 $tenantStmt->close();
@@ -106,7 +124,7 @@ if (!$tenant) {
     ]);
 }
 
-if (isset($tenant["status"]) && strtolower((string)$tenant["status"]) !== "active") {
+if (isset($tenant["status"]) && strtolower((string) $tenant["status"]) !== "active") {
     respond(403, [
         "success" => false,
         "message" => "Tenant is inactive."
@@ -137,17 +155,26 @@ $categoriesStmt = $conn->prepare($categoriesSql);
 if (!$categoriesStmt) {
     respond(500, [
         "success" => false,
-        "message" => "Failed to prepare categories query."
+        "message" => "Failed to prepare categories query.",
+        "error" => $conn->error
     ]);
 }
 
 $categoriesStmt->bind_param("i", $tenantId);
-$categoriesStmt->execute();
+
+if (!$categoriesStmt->execute()) {
+    respond(500, [
+        "success" => false,
+        "message" => "Failed to execute categories query.",
+        "error" => $categoriesStmt->error
+    ]);
+}
+
 $categoriesResult = $categoriesStmt->get_result();
 
 while ($row = $categoriesResult->fetch_assoc()) {
     $categories[] = [
-        "id" => (string)$row["id"],
+        "id" => (string) $row["id"],
         "label" => $row["name"],
         "icon" => $row["icon"] ?: "grid-view",
     ];
@@ -189,23 +216,32 @@ $featuredStmt = $conn->prepare($featuredSql);
 if (!$featuredStmt) {
     respond(500, [
         "success" => false,
-        "message" => "Failed to prepare featured item query."
+        "message" => "Failed to prepare featured item query.",
+        "error" => $conn->error
     ]);
 }
 
 $featuredStmt->bind_param("i", $tenantId);
-$featuredStmt->execute();
+
+if (!$featuredStmt->execute()) {
+    respond(500, [
+        "success" => false,
+        "message" => "Failed to execute featured item query.",
+        "error" => $featuredStmt->error
+    ]);
+}
+
 $featuredResult = $featuredStmt->get_result();
 $featuredRow = $featuredResult->fetch_assoc();
 $featuredStmt->close();
 
 if ($featuredRow) {
     $featured = [
-        "id" => (string)$featuredRow["id"],
+        "id" => (string) $featuredRow["id"],
         "name" => $featuredRow["item_name"],
         "subtitle" => $featuredRow["condition_notes"] ?: "Premium item available now.",
-        "image" => $featuredRow["item_photo_path"] ?: "",
-        "price" => number_format((float)$featuredRow["display_price"], 2, ".", ""),
+        "image" => fullImageUrl((string) ($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
+        "price" => number_format((float) $featuredRow["display_price"], 2, ".", ""),
         "category" => $featuredRow["category_name"] ?: $featuredRow["item_category"],
     ];
 }
@@ -265,27 +301,35 @@ $productsSql .= "
 
 $productsStmt = $conn->prepare($productsSql);
 
-if (!$categoriesStmt) {
+if (!$productsStmt) {
     respond(500, [
         "success" => false,
-        "message" => "Failed to prepare categories query.",
+        "message" => "Failed to prepare products query.",
         "error" => $conn->error
     ]);
 }
 
 $productsStmt->bind_param($types, ...$params);
-$productsStmt->execute();
+
+if (!$productsStmt->execute()) {
+    respond(500, [
+        "success" => false,
+        "message" => "Failed to execute products query.",
+        "error" => $productsStmt->error
+    ]);
+}
+
 $productsResult = $productsStmt->get_result();
 
 while ($row = $productsResult->fetch_assoc()) {
     $products[] = [
-        "id" => (string)$row["id"],
+        "id" => (string) $row["id"],
         "category" => $row["category_name"] ?: $row["item_category"],
         "name" => $row["item_name"],
-        "price" => "$" . number_format((float)$row["display_price"], 2),
-        "raw_price" => number_format((float)$row["display_price"], 2, ".", ""),
-        "image" => $row["item_photo_path"] ?: "",
-        "badge" => ((int)$row["is_featured"] === 1) ? "Featured" : null,
+        "price" => "$" . number_format((float) $row["display_price"], 2),
+        "raw_price" => number_format((float) $row["display_price"], 2, ".", ""),
+        "image" => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
+        "badge" => ((int) $row["is_featured"] === 1) ? "Featured" : null,
         "description" => $row["condition_notes"] ?: "",
     ];
 }
@@ -300,7 +344,7 @@ $productsStmt->close();
 respond(200, [
     "success" => true,
     "tenant" => [
-        "id" => (int)$tenant["id"],
+        "id" => (int) $tenant["id"],
         "name" => $tenant["name"],
     ],
     "filters" => [
