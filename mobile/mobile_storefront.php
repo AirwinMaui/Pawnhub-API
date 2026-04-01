@@ -27,22 +27,9 @@ function getTenantId(): ?int
     return null;
 }
 
-function fullImageUrl(string $path, string $baseUrl): string
-{
-    $path = trim($path);
-
-    if ($path === '') {
-        return '';
-    }
-
-    if (preg_match('/^https?:\/\//i', $path)) {
-        return $path;
-    }
-
-    return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
-}
+$tenantId = getTenantId();
 
 respond(200, [
     "success" => true,
-    "message" => "helpers loaded"
+    "tenant" => $tenantId
 ]);
