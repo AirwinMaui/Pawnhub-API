@@ -2,14 +2,11 @@
 declare(strict_types=1);
 
 header("Content-Type: application/json; charset=UTF-8");
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
 
-require_once __DIR__ . "/db.php";
+require_once __DIR__ . "/../db.php";
 
-/*
-|--------------------------------------------------------------------------
-| Helpers
-|--------------------------------------------------------------------------
-*/
 function respond(int $statusCode, array $payload): void
 {
     http_response_code($statusCode);
@@ -17,293 +14,75 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function getStringParam(string $key, string $default = ""): string
+function getIntParam(string $key): ?int
 {
-    return isset($_GET[$key]) ? trim((string)$_GET[$key]) : $default;
+    return isset($_GET[$key]) && is_numeric($_GET[$key])
+        ? (int) $_GET[$key]
+        : null;
 }
 
-function getIntParam(string $key, ?int $default = null): ?int
+function fullImageUrl(string $path): string
 {
-    if (!isset($_GET[$key]) || $_GET[$key] === "") {
-        return $default;
-    }
-
-    if (!is_numeric($_GET[$key])) {
-        return $default;
-    }
-
-    return (int)$_GET[$key];
+    $base = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
+    if (!$path) return "";
+    if (preg_match('/^https?:\/\//', $path)) return $path;
+    return $base . ltrim($path, '/');
 }
 
-/*
-|--------------------------------------------------------------------------
-| DB connection check
-|--------------------------------------------------------------------------
-*/
-if (!isset($conn) || !($conn instanceof mysqli)) {
-    respond(500, [
-        "success" => false,
-        "message" => "Database connection is not available."
-    ]);
+if (!isset($conn)) {
+    respond(500, ["success" => false, "message" => "DB connection failed"]);
 }
 
-$conn->set_charset("utf8mb4");
-
-/*
-|--------------------------------------------------------------------------
-| Tenant resolution
-|--------------------------------------------------------------------------
-| Best practice:
-| - resolve tenant_id from authenticated user/session/token
-| Temporary fallback here:
-| - allow tenant_id via query param during development
-*/
 $tenantId = getIntParam("tenant_id");
-
-if (!$tenantId || $tenantId <= 0) {
-    respond(400, [
-        "success" => false,
-        "message" => "Missing or invalid tenant_id."
-    ]);
+if (!$tenantId) {
+    respond(400, ["success" => false, "message" => "Missing tenant_id"]);
 }
 
 /*
 |--------------------------------------------------------------------------
-| Filters
+| Simple working query (no advanced fields yet)
 |--------------------------------------------------------------------------
 */
-$search = getStringParam("search");
-$categoryId = getIntParam("category_id");
 
-/*
-|--------------------------------------------------------------------------
-| Validate tenant exists and is active
-|--------------------------------------------------------------------------
-*/
-$tenantSql = "SELECT id, name, status FROM tenants WHERE id = ? LIMIT 1";
-$tenantStmt = $conn->prepare($tenantSql);
-
-if (!$tenantStmt) {
-    respond(500, [
-        "success" => false,
-        "message" => "Failed to prepare tenant query."
-    ]);
-}
-
-$tenantStmt->bind_param("i", $tenantId);
-$tenantStmt->execute();
-$tenantResult = $tenantStmt->get_result();
-$tenant = $tenantResult->fetch_assoc();
-$tenantStmt->close();
-
-if (!$tenant) {
-    respond(404, [
-        "success" => false,
-        "message" => "Tenant not found."
-    ]);
-}
-
-if (isset($tenant["status"]) && strtolower((string)$tenant["status"]) !== "active") {
-    respond(403, [
-        "success" => false,
-        "message" => "Tenant is inactive."
-    ]);
-}
-
-/*
-|--------------------------------------------------------------------------
-| Categories
-|--------------------------------------------------------------------------
-*/
-$categories = [];
-
-$categoriesSql = "
-    SELECT
+$sql = "
+    SELECT 
         id,
-        name,
-        icon,
-        sort_order
-    FROM shop_categories
+        item_name,
+        item_category,
+        item_photo_path,
+        appraisal_value
+    FROM item_inventory
     WHERE tenant_id = ?
-      AND is_active = 1
-    ORDER BY sort_order ASC, name ASC
+    LIMIT 20
 ";
 
-$categoriesStmt = $conn->prepare($categoriesSql);
+$stmt = $conn->prepare($sql);
 
-if (!$categoriesStmt) {
-    respond(500, [
-        "success" => false,
-        "message" => "Failed to prepare categories query."
-    ]);
+if (!$stmt) {
+    respond(500, ["success" => false, "error" => $conn->error]);
 }
 
-$categoriesStmt->bind_param("i", $tenantId);
-$categoriesStmt->execute();
-$categoriesResult = $categoriesStmt->get_result();
+$stmt->bind_param("i", $tenantId);
 
-while ($row = $categoriesResult->fetch_assoc()) {
-    $categories[] = [
-        "id" => (string)$row["id"],
-        "label" => $row["name"],
-        "icon" => $row["icon"] ?: "grid-view",
-    ];
+if (!$stmt->execute()) {
+    respond(500, ["success" => false, "error" => $stmt->error]);
 }
 
-$categoriesStmt->close();
+$result = $stmt->get_result();
 
-/*
-|--------------------------------------------------------------------------
-| Featured item
-|--------------------------------------------------------------------------
-*/
-$featured = null;
-
-$featuredSql = "
-    SELECT
-        ii.id,
-        ii.item_name,
-        ii.item_category,
-        ii.condition_notes,
-        ii.item_photo_path,
-        ii.display_price,
-        ii.is_featured,
-        sc.name AS category_name
-    FROM item_inventory ii
-    LEFT JOIN shop_categories sc
-        ON sc.id = ii.category_id
-       AND sc.tenant_id = ii.tenant_id
-    WHERE ii.tenant_id = ?
-      AND ii.is_shop_visible = 1
-      AND ii.is_featured = 1
-      AND ii.status = 'available'
-    ORDER BY ii.sort_order ASC, ii.id DESC
-    LIMIT 1
-";
-
-$featuredStmt = $conn->prepare($featuredSql);
-
-if (!$featuredStmt) {
-    respond(500, [
-        "success" => false,
-        "message" => "Failed to prepare featured item query."
-    ]);
-}
-
-$featuredStmt->bind_param("i", $tenantId);
-$featuredStmt->execute();
-$featuredResult = $featuredStmt->get_result();
-$featuredRow = $featuredResult->fetch_assoc();
-$featuredStmt->close();
-
-if ($featuredRow) {
-    $featured = [
-        "id" => (string)$featuredRow["id"],
-        "name" => $featuredRow["item_name"],
-        "subtitle" => $featuredRow["condition_notes"] ?: "Premium item available now.",
-        "image" => $featuredRow["item_photo_path"] ?: "",
-        "price" => number_format((float)$featuredRow["display_price"], 2, ".", ""),
-        "category" => $featuredRow["category_name"] ?: $featuredRow["item_category"],
-    ];
-}
-
-/*
-|--------------------------------------------------------------------------
-| Products
-|--------------------------------------------------------------------------
-*/
 $products = [];
 
-$productsSql = "
-    SELECT
-        ii.id,
-        ii.item_name,
-        ii.item_category,
-        ii.condition_notes,
-        ii.item_photo_path,
-        ii.display_price,
-        ii.is_featured,
-        sc.name AS category_name
-    FROM item_inventory ii
-    LEFT JOIN shop_categories sc
-        ON sc.id = ii.category_id
-       AND sc.tenant_id = ii.tenant_id
-    WHERE ii.tenant_id = ?
-      AND ii.is_shop_visible = 1
-      AND ii.status = 'available'
-";
-
-$params = [$tenantId];
-$types = "i";
-
-if ($categoryId && $categoryId > 0) {
-    $productsSql .= " AND ii.category_id = ? ";
-    $params[] = $categoryId;
-    $types .= "i";
-}
-
-if ($search !== "") {
-    $productsSql .= " AND (
-        ii.item_name LIKE ?
-        OR ii.item_category LIKE ?
-        OR ii.condition_notes LIKE ?
-    ) ";
-    $searchLike = "%" . $search . "%";
-    $params[] = $searchLike;
-    $params[] = $searchLike;
-    $params[] = $searchLike;
-    $types .= "sss";
-}
-
-$productsSql .= "
-    ORDER BY ii.is_featured DESC, ii.sort_order ASC, ii.id DESC
-    LIMIT 50
-";
-
-$productsStmt = $conn->prepare($productsSql);
-
-if (!$productsStmt) {
-    respond(500, [
-        "success" => false,
-        "message" => "Failed to prepare products query."
-    ]);
-}
-
-$productsStmt->bind_param($types, ...$params);
-$productsStmt->execute();
-$productsResult = $productsStmt->get_result();
-
-while ($row = $productsResult->fetch_assoc()) {
+while ($row = $result->fetch_assoc()) {
     $products[] = [
         "id" => (string)$row["id"],
-        "category" => $row["category_name"] ?: $row["item_category"],
         "name" => $row["item_name"],
-        "price" => "$" . number_format((float)$row["display_price"], 2),
-        "raw_price" => number_format((float)$row["display_price"], 2, ".", ""),
-        "image" => $row["item_photo_path"] ?: "",
-        "badge" => ((int)$row["is_featured"] === 1) ? "Featured" : null,
-        "description" => $row["condition_notes"] ?: "",
+        "category" => $row["item_category"],
+        "price" => "$" . number_format((float)$row["appraisal_value"], 2),
+        "image" => fullImageUrl($row["item_photo_path"] ?? "")
     ];
 }
 
-$productsStmt->close();
-
-/*
-|--------------------------------------------------------------------------
-| Response
-|--------------------------------------------------------------------------
-*/
 respond(200, [
     "success" => true,
-    "tenant" => [
-        "id" => (int)$tenant["id"],
-        "name" => $tenant["name"],
-    ],
-    "filters" => [
-        "search" => $search,
-        "category_id" => $categoryId,
-    ],
-    "categories" => $categories,
-    "featured" => $featured,
-    "products" => $products,
+    "products" => $products
 ]);
