@@ -22,6 +22,21 @@ function getTenantId(): ?int
     return null;
 }
 
+function fullImageUrl(string $path, string $baseUrl): string
+{
+    $path = trim($path);
+
+    if ($path === '') {
+        return '';
+    }
+
+    if (preg_match('/^https?:\/\//i', $path)) {
+        return $path;
+    }
+
+    return rtrim($baseUrl, '/') . '/' . ltrim($path, '/');
+}
+
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     respond(500, ["success" => false, "message" => "PDO missing"]);
 }
@@ -30,6 +45,8 @@ $tenantId = getTenantId();
 if (!$tenantId) {
     respond(400, ["success" => false, "message" => "Missing tenant"]);
 }
+
+$imageBaseUrl = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
 
 try {
     $stmt = $pdo->prepare("
@@ -49,14 +66,42 @@ try {
         ]);
     }
 
+    $productsStmt = $pdo->prepare("
+        SELECT
+            id,
+            item_name,
+            item_category,
+            item_photo_path,
+            appraisal_value
+        FROM item_inventory
+        WHERE tenant_id = :tenant
+        ORDER BY id DESC
+        LIMIT 20
+    ");
+    $productsStmt->execute(["tenant" => $tenantId]);
+    $rows = $productsStmt->fetchAll();
+
+    $products = [];
+
+    foreach ($rows as $row) {
+        $products[] = [
+            "id" => (string)$row["id"],
+            "name" => $row["item_name"],
+            "category" => $row["item_category"],
+            "price" => "$" . number_format((float)$row["appraisal_value"], 2),
+            "image" => fullImageUrl((string)($row["item_photo_path"] ?? ""), $imageBaseUrl),
+        ];
+    }
+
     respond(200, [
         "success" => true,
-        "tenant" => $tenant
+        "tenant" => $tenant,
+        "products" => $products
     ]);
 } catch (Throwable $e) {
     respond(500, [
         "success" => false,
-        "message" => "Tenant query failed",
+        "message" => "Storefront query failed",
         "error" => $e->getMessage()
     ]);
 }
