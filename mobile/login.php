@@ -17,7 +17,8 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     ]);
     exit;
 }
-require __DIR__ . '/db.php';
+
+require __DIR__ . '/../db.php';
 
 try {
     $raw = file_get_contents('php://input');
@@ -55,19 +56,17 @@ try {
             c.is_active,
             c.password_hash,
             c.registered_at,
-            t.business_name AS tenant_name,
-            t.slug AS tenant_slug
+            t.tenant_code,
+            t.business_name,
+            t.slug
         FROM customers c
-        LEFT JOIN tenants t ON c.tenant_id = t.id
+        JOIN tenants t ON c.tenant_id = t.id
         WHERE c.username = :username
         LIMIT 1
     ");
 
-    $stmt->execute([
-        ':username' => $username,
-    ]);
-
-    $customer = $stmt->fetch();
+    $stmt->execute([':username' => $username]);
+    $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
         http_response_code(401);
@@ -109,15 +108,18 @@ try {
         'success' => true,
         'message' => 'Login successful',
         'customer' => [
-            'id' => $customer['id'],
-            'tenant_id' => $customer['tenant_id'],
+            'id' => (int)$customer['id'],
             'full_name' => $customer['full_name'],
             'username' => $customer['username'],
             'contact_number' => $customer['contact_number'],
             'email' => $customer['email'],
             'registered_at' => $customer['registered_at'],
-            'tenant_name' => $customer['tenant_name'],
-            'tenant_slug' => $customer['tenant_slug'],
+        ],
+        'tenant' => [
+            'id' => (int)$customer['tenant_id'],
+            'tenant_code' => (int)$customer['tenant_code'],
+            'name' => $customer['business_name'],
+            'slug' => $customer['slug'],
         ],
     ]);
     exit;
