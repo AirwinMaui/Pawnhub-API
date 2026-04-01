@@ -14,26 +14,24 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function getIntParam(string $key, ?int $default = null): ?int
+function getTenantId(): ?int
 {
-    if (!isset($_GET[$key]) || $_GET[$key] === '') {
-        return $default;
+    if (isset($_GET["tenant"]) && is_numeric($_GET["tenant"])) {
+        return (int) $_GET["tenant"];
     }
 
-    if (!is_numeric($_GET[$key])) {
-        return $default;
+    if (isset($_GET["tenant_id"]) && is_numeric($_GET["tenant_id"])) {
+        return (int) $_GET["tenant_id"];
     }
 
-    return (int) $_GET[$key];
+    return null;
 }
 
 function fullImageUrl(string $path, string $baseUrl): string
 {
     $path = trim($path);
 
-    if ($path === '') {
-        return '';
-    }
+    if ($path === '') return '';
 
     if (preg_match('/^https?:\/\//i', $path)) {
         return $path;
@@ -45,29 +43,31 @@ function fullImageUrl(string $path, string $baseUrl): string
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     respond(500, [
         "success" => false,
-        "message" => "PDO database connection is not available."
+        "message" => "Database connection not available."
+    ]);
+}
+
+$tenantId = getTenantId();
+
+if (!$tenantId || $tenantId <= 0) {
+    respond(400, [
+        "success" => false,
+        "message" => "Missing or invalid tenant."
     ]);
 }
 
 $imageBaseUrl = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
 
-$tenantId = getIntParam("tenant_id");
-if (!$tenantId || $tenantId <= 0) {
-    respond(400, [
-        "success" => false,
-        "message" => "Missing or invalid tenant_id."
-    ]);
-}
-
 try {
-    $tenantStmt = $pdo->prepare("
+    // Check tenant
+    $stmt = $pdo->prepare("
         SELECT id, name, status
         FROM tenants
-        WHERE id = :tenant_id
+        WHERE id = :tenant
         LIMIT 1
     ");
-    $tenantStmt->execute(["tenant_id" => $tenantId]);
-    $tenant = $tenantStmt->fetch();
+    $stmt->execute(["tenant" => $tenantId]);
+    $tenant = $stmt->fetch();
 
     if (!$tenant) {
         respond(404, [
@@ -76,14 +76,15 @@ try {
         ]);
     }
 
-    if (isset($tenant["status"]) && strtolower((string)$tenant["status"]) !== "active") {
+    if (isset($tenant["status"]) && strtolower($tenant["status"]) !== "active") {
         respond(403, [
             "success" => false,
-            "message" => "Tenant is inactive."
+            "message" => "Tenant inactive."
         ]);
     }
 
-    $productsStmt = $pdo->prepare("
+    // Get products
+    $stmt = $pdo->prepare("
         SELECT
             id,
             item_name,
@@ -91,12 +92,12 @@ try {
             item_photo_path,
             appraisal_value
         FROM item_inventory
-        WHERE tenant_id = :tenant_id
+        WHERE tenant_id = :tenant
         ORDER BY id DESC
         LIMIT 20
     ");
-    $productsStmt->execute(["tenant_id" => $tenantId]);
-    $rows = $productsStmt->fetchAll();
+    $stmt->execute(["tenant" => $tenantId]);
+    $rows = $stmt->fetchAll();
 
     $products = [];
 
@@ -106,7 +107,7 @@ try {
             "name" => $row["item_name"],
             "category" => $row["item_category"],
             "price" => "$" . number_format((float)$row["appraisal_value"], 2),
-            "image" => fullImageUrl((string)($row["item_photo_path"] ?? ""), $imageBaseUrl),
+            "image" => fullImageUrl($row["item_photo_path"] ?? "", $imageBaseUrl),
         ];
     }
 
@@ -118,10 +119,11 @@ try {
         ],
         "products" => $products,
     ]);
+
 } catch (Throwable $e) {
     respond(500, [
         "success" => false,
-        "message" => "Storefront query failed.",
-        "error" => $e->getMessage(),
+        "message" => "Storefront failed",
+        "error" => $e->getMessage()
     ]);
 }
