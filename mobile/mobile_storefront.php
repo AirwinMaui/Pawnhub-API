@@ -5,16 +5,15 @@ header("Content-Type: application/json; charset=UTF-8");
 ini_set('display_errors', '1');
 error_reporting(E_ALL);
 
-function respond(int $statusCode, array $payload): void
-{
-    http_response_code($statusCode);
-    echo json_encode($payload);
+function respond($data) {
+    echo json_encode($data);
     exit;
 }
 
-echo json_encode([
-    "step" => "before require",
-    "path" => __DIR__ . "/../db.php",
-    "exists" => file_exists(__DIR__ . "/../db.php")
+require_once __DIR__ . "/../db.php";
+
+respond([
+    "step" => "after require",
+    "conn_exists" => isset($conn),
+    "conn_type" => isset($conn) ? gettype($conn) : null
 ]);
-exit;
