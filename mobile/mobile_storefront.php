@@ -112,7 +112,7 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
 
 $tenantId = getIntParam("tenant");
 $categoryId = getIntParam("category_id");
-$search = getStringParam("q");
+$search = getStringParam("keyword");
 $limit = getIntParam("limit") ?? 20;
 
 if (!$tenantId) {
