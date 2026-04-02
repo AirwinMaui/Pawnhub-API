@@ -14,22 +14,58 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
+function requestData(): array
+{
+    static $data = null;
+
+    if ($data !== null) {
+        return $data;
+    }
+
+    $data = [];
+
+    if (!empty($_GET)) {
+        $data = array_merge($data, $_GET);
+    }
+
+    if (!empty($_POST)) {
+        $data = array_merge($data, $_POST);
+    }
+
+    $raw = file_get_contents("php://input");
+    if ($raw !== false && trim($raw) !== '') {
+        $json = json_decode($raw, true);
+        if (is_array($json)) {
+            $data = array_merge($data, $json);
+        } else {
+            $parsed = [];
+            parse_str($raw, $parsed);
+            if (is_array($parsed) && !empty($parsed)) {
+                $data = array_merge($data, $parsed);
+            }
+        }
+    }
+
+    return $data;
+}
+
 function getIntParam(string $key): ?int
 {
-    if (!isset($_GET[$key])) {
+    $data = requestData();
+    $value = $data[$key] ?? null;
+
+    if ($value === null || $value === '' || !is_numeric((string)$value)) {
         return null;
     }
 
-    if ($_GET[$key] === '' || !is_numeric($_GET[$key])) {
-        return null;
-    }
-
-    return (int) $_GET[$key];
+    return (int) $value;
 }
 
 function getStringParam(string $key, int $maxLen = 100): string
 {
-    $value = isset($_GET[$key]) ? trim((string) $_GET[$key]) : '';
+    $data = requestData();
+    $value = trim((string)($data[$key] ?? ''));
+
     if ($value === '') {
         return '';
     }
@@ -42,7 +78,7 @@ function fullImageUrl(string $path, string $baseUrl): string
     $path = trim($path);
 
     if ($path === '') {
-        return rtrim($baseUrl, '/') . '/uploads/default-product.png';
+        return '';
     }
 
     if (preg_match('/^https?:\/\//i', $path)) {
@@ -57,14 +93,12 @@ function mapCategoryIcon(string $category): string
     $category = strtolower(trim($category));
 
     return match (true) {
-        str_contains($category, 'jewel') || str_contains($category, 'gold') || str_contains($category, 'ring') => 'diamond',
+        str_contains($category, 'watch') => 'watch',
         str_contains($category, 'phone') || str_contains($category, 'mobile') => 'smartphone',
         str_contains($category, 'laptop') || str_contains($category, 'computer') => 'laptop',
-        str_contains($category, 'watch') => 'watch',
+        str_contains($category, 'jewel') || str_contains($category, 'gold') || str_contains($category, 'ring') => 'diamond',
         str_contains($category, 'camera') => 'photo-camera',
         str_contains($category, 'bag') => 'shopping-bag',
-        str_contains($category, 'guitar') || str_contains($category, 'instrument') => 'music-note',
-        str_contains($category, 'appliance') => 'kitchen',
         default => 'category',
     };
 }
@@ -84,7 +118,8 @@ $limit = getIntParam("limit") ?? 20;
 if (!$tenantId) {
     respond(400, [
         "success" => false,
-        "message" => "Missing tenant"
+        "message" => "Missing tenant",
+        "debug" => requestData()
     ]);
 }
 
@@ -110,13 +145,8 @@ try {
         ]);
     }
 
-    /**
-     * CATEGORY LIST
-     * If you have a categories table, use that instead.
-     * For now we derive categories from item_inventory.item_category.
-     */
     $catStmt = $pdo->prepare("
-        SELECT 
+        SELECT
             MIN(id) AS id,
             item_category AS label
         FROM item_inventory
@@ -138,11 +168,6 @@ try {
         ];
     }
 
-    /**
-     * FEATURED ITEM
-     * You can replace this with a real is_featured column later.
-     * For now: highest appraisal value item for this tenant.
-     */
     $featuredStmt = $pdo->prepare("
         SELECT
             id,
@@ -170,10 +195,6 @@ try {
         ];
     }
 
-    /**
-     * PRODUCTS
-     * If category_id is sent, we resolve it through the selected category label.
-     */
     $selectedCategoryLabel = null;
     if ($categoryId !== null) {
         $resolveCatStmt = $pdo->prepare("
@@ -233,6 +254,7 @@ try {
             is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
         );
     }
+
     $productsStmt->bindValue(":limit", $limit, PDO::PARAM_INT);
     $productsStmt->execute();
 
