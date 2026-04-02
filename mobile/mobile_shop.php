@@ -2,87 +2,67 @@
 declare(strict_types=1);
 
 header("Content-Type: application/json; charset=UTF-8");
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Methods: GET, POST, OPTIONS');
 ini_set('display_errors', '0');
 error_reporting(E_ALL);
 
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200); exit;
+}
+
 require_once __DIR__ . "/../db.php";
 
-function respond(int $statusCode, array $payload): void
-{
+function respond(int $statusCode, array $payload): void {
     http_response_code($statusCode);
-    echo json_encode($payload);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }
 
-function getIntParam(string $key): ?int
-{
-    return isset($_GET[$key]) && is_numeric($_GET[$key])
-        ? (int) $_GET[$key]
-        : null;
-}
-
-function fullImageUrl(string $path): string
-{
+function fullImageUrl(string $path): string {
     $base = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
     if (!$path) return "";
     if (preg_match('/^https?:\/\//', $path)) return $path;
     return $base . ltrim($path, '/');
 }
 
-if (!isset($conn)) {
-    respond(500, ["success" => false, "message" => "DB connection failed"]);
-}
+// Support GET and POST
+$tenantId = (int)($_GET['tenant_id'] ?? $_POST['tenant_id'] ?? 0);
 
-$tenantId = getIntParam("tenant_id");
 if (!$tenantId) {
     respond(400, ["success" => false, "message" => "Missing tenant_id"]);
 }
 
-/*
-|--------------------------------------------------------------------------
-| Simple working query (no advanced fields yet)
-|--------------------------------------------------------------------------
-*/
+try {
+    $stmt = $pdo->prepare("
+        SELECT
+            id,
+            item_name,
+            item_category,
+            item_photo_path,
+            appraisal_value
+        FROM item_inventory
+        WHERE tenant_id = ?
+        ORDER BY id DESC
+        LIMIT 20
+    ");
+    $stmt->execute([$tenantId]);
+    $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-$sql = "
-    SELECT 
-        id,
-        item_name,
-        item_category,
-        item_photo_path,
-        appraisal_value
-    FROM item_inventory
-    WHERE tenant_id = ?
-    LIMIT 20
-";
+    $products = [];
+    foreach ($rows as $row) {
+        $products[] = [
+            "id"       => (string)$row["id"],
+            "name"     => (string)($row["item_name"] ?? ''),
+            "category" => (string)($row["item_category"] ?? ''),
+            "price"    => "₱" . number_format((float)$row["appraisal_value"], 2),
+            "image"    => fullImageUrl((string)($row["item_photo_path"] ?? "")),
+        ];
+    }
 
-$stmt = $conn->prepare($sql);
+    respond(200, ["success" => true, "products" => $products]);
 
-if (!$stmt) {
-    respond(500, ["success" => false, "error" => $conn->error]);
+} catch (Throwable $e) {
+    respond(500, ["success" => false, "message" => "Server error", "error" => $e->getMessage()]);
 }
-
-$stmt->bind_param("i", $tenantId);
-
-if (!$stmt->execute()) {
-    respond(500, ["success" => false, "error" => $stmt->error]);
-}
-
-$result = $stmt->get_result();
-
-$products = [];
-
-while ($row = $result->fetch_assoc()) {
-    $products[] = [
-        "id" => (string)$row["id"],
-        "name" => $row["item_name"],
-        "category" => $row["item_category"],
-        "price" => "$" . number_format((float)$row["appraisal_value"], 2),
-        "image" => fullImageUrl($row["item_photo_path"] ?? "")
-    ];
-}
-
-respond(200, [
-    "success" => true,
-    "products" => $products
-]);
