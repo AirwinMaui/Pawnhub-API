@@ -11,7 +11,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     http_response_code(405);
-    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Method not allowed'
+    ]);
     exit;
 }
 
@@ -25,7 +28,10 @@ try {
 
     if ($customerId <= 0 || $tenantId <= 0) {
         http_response_code(400);
-        echo json_encode(['success' => false, 'message' => 'Missing customer_id or tenant_id']);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Missing customer_id or tenant_id'
+        ]);
         exit;
     }
 
@@ -40,8 +46,8 @@ try {
             c.address,
             c.gender,
             c.nationality,
-            c.birthplace,
-            c.registered_at,
+            c.created_at,
+            c.profile_photo,
             t.id AS tenant_id,
             t.tenant_code,
             t.business_name,
@@ -53,11 +59,12 @@ try {
             ts.logo_url,
             ts.system_name,
             ts.bg_image_url
-        FROM customers c
+        FROM mobile_customers c
         JOIN tenants t ON c.tenant_id = t.id
         LEFT JOIN tenant_settings ts ON ts.tenant_id = t.id
         WHERE c.id = :customer_id
           AND c.tenant_id = :tenant_id
+          AND c.is_active = 1
         LIMIT 1
     ");
 
@@ -70,7 +77,10 @@ try {
 
     if (!$row) {
         http_response_code(404);
-        echo json_encode(['success' => false, 'message' => 'Customer not found']);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Customer not found'
+        ]);
         exit;
     }
 
@@ -86,12 +96,13 @@ try {
             'address' => $row['address'],
             'gender' => $row['gender'],
             'nationality' => $row['nationality'],
-            'birthplace' => $row['birthplace'],
-            'registered_at' => $row['registered_at'],
+            'birthplace' => null,
+            'registered_at' => $row['created_at'],
+            'profile_photo' => $row['profile_photo'],
         ],
         'tenant' => [
             'id' => (int)$row['tenant_id'],
-            'tenant_code' => (int)$row['tenant_code'],
+            'tenant_code' => $row['tenant_code'],
             'name' => $row['business_name'],
             'slug' => $row['slug'],
         ],
@@ -109,6 +120,10 @@ try {
 
 } catch (Throwable $e) {
     http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Server error', 'error' => $e->getMessage()]);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Server error',
+        'error' => $e->getMessage()
+    ]);
     exit;
 }
