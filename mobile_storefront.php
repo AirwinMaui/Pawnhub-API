@@ -2,7 +2,7 @@
 declare(strict_types=1);
 
 header("Content-Type: application/json; charset=UTF-8");
-ini_set("display_errors", "1");
+ini_set("display_errors", "0");
 error_reporting(E_ALL);
 
 require_once __DIR__ . "/db.php";
@@ -145,16 +145,12 @@ try {
         ]);
     }
 
+    // Use shop_categories table for proper categories
     $catStmt = $pdo->prepare("
-        SELECT
-            MIN(id) AS id,
-            item_category AS label
-        FROM item_inventory
-        WHERE tenant_id = :tenant
-          AND item_category IS NOT NULL
-          AND item_category <> ''
-        GROUP BY item_category
-        ORDER BY item_category ASC
+        SELECT id, name AS label, icon
+        FROM shop_categories
+        WHERE tenant_id = :tenant AND is_active = 1
+        ORDER BY sort_order ASC, name ASC
     ");
     $catStmt->execute(["tenant" => $tenantId]);
     $categoryRows = $catStmt->fetchAll(PDO::FETCH_ASSOC);
@@ -162,22 +158,24 @@ try {
     $categories = [];
     foreach ($categoryRows as $row) {
         $categories[] = [
-            "id" => (string) $row["id"],
+            "id"    => (string) $row["id"],
             "label" => (string) $row["label"],
-            "icon" => mapCategoryIcon((string) $row["label"]),
+            "icon"  => $row["icon"] ?: mapCategoryIcon((string) $row["label"]),
         ];
     }
 
+    // Featured: prefer is_featured=1, fallback to highest display_price
     $featuredStmt = $pdo->prepare("
         SELECT
-            id,
-            item_name,
-            item_category,
-            item_photo_path,
-            appraisal_value
-        FROM item_inventory
-        WHERE tenant_id = :tenant
-        ORDER BY appraisal_value DESC, id DESC
+            i.id, i.item_name, i.item_category, i.item_photo_path,
+            i.display_price, i.appraisal_value, i.is_featured,
+            c.name AS cat_name
+        FROM item_inventory i
+        LEFT JOIN shop_categories c ON c.id = i.category_id
+        WHERE i.tenant_id = :tenant
+          AND i.is_shop_visible = 1
+          AND i.stock_qty > 0
+        ORDER BY i.is_featured DESC, i.display_price DESC, i.id DESC
         LIMIT 1
     ");
     $featuredStmt->execute(["tenant" => $tenantId]);
@@ -185,76 +183,50 @@ try {
 
     $featured = null;
     if ($featuredRow) {
+        $price = (float)($featuredRow["display_price"] > 0 ? $featuredRow["display_price"] : $featuredRow["appraisal_value"]);
         $featured = [
-            "id" => (string) $featuredRow["id"],
-            "name" => (string) $featuredRow["item_name"],
-            "subtitle" => "Top valued item in this shop",
-            "image" => fullImageUrl((string) ($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
-            "price" => number_format((float) $featuredRow["appraisal_value"], 2),
-            "category" => (string) ($featuredRow["item_category"] ?? "General"),
+            "id"       => (string) $featuredRow["id"],
+            "name"     => (string) $featuredRow["item_name"],
+            "subtitle" => (int)$featuredRow["is_featured"] === 1 ? "Featured item" : "Top valued item in this shop",
+            "image"    => fullImageUrl((string) ($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
+            "price"    => number_format($price, 2),
+            "category" => (string) ($featuredRow["cat_name"] ?? $featuredRow["item_category"] ?? "General"),
         ];
     }
 
-    $selectedCategoryLabel = null;
-    if ($categoryId !== null) {
-        $resolveCatStmt = $pdo->prepare("
-            SELECT item_category
-            FROM item_inventory
-            WHERE tenant_id = :tenant
-              AND id = :id
-            LIMIT 1
-        ");
-        $resolveCatStmt->execute([
-            "tenant" => $tenantId,
-            "id" => $categoryId
-        ]);
-        $selectedCategoryLabel = $resolveCatStmt->fetchColumn();
-
-        if ($selectedCategoryLabel === false) {
-            $selectedCategoryLabel = null;
-        }
-    }
+    $selectedCategoryId = $categoryId; // use category_id directly in query
 
     $sql = "
         SELECT
-            id,
-            item_name,
-            item_category,
-            item_photo_path,
-            appraisal_value
-        FROM item_inventory
-        WHERE tenant_id = :tenant
+            i.id, i.item_name, i.item_category, i.item_photo_path,
+            i.display_price, i.appraisal_value, i.is_featured,
+            i.stock_qty, i.condition_notes,
+            c.name AS cat_name, c.icon AS cat_icon
+        FROM item_inventory i
+        LEFT JOIN shop_categories c ON c.id = i.category_id
+        WHERE i.tenant_id = :tenant
+          AND i.is_shop_visible = 1
+          AND i.stock_qty > 0
     ";
 
-    $params = [
-        "tenant" => $tenantId
-    ];
+    $params = ["tenant" => $tenantId];
 
     if ($search !== '') {
-        $sql .= " AND (
-            item_name LIKE :search
-            OR item_category LIKE :search
-        )";
+        $sql .= " AND (i.item_name LIKE :search OR i.item_category LIKE :search OR c.name LIKE :search)";
         $params["search"] = "%" . $search . "%";
     }
 
-    if ($selectedCategoryLabel !== null) {
-        $sql .= " AND item_category = :category_label";
-        $params["category_label"] = $selectedCategoryLabel;
+    if ($selectedCategoryId !== null) {
+        $sql .= " AND i.category_id = :cat_id";
+        $params["cat_id"] = $selectedCategoryId;
     }
 
-    $sql .= " ORDER BY id DESC LIMIT :limit";
+    $sql .= " ORDER BY i.is_featured DESC, i.sort_order ASC, i.id DESC LIMIT :limit";
 
     $productsStmt = $pdo->prepare($sql);
-
     foreach ($params as $key => $value) {
-        $productsStmt->bindValue(
-            ":" . $key,
-            $value,
-            is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
-        );
+        $productsStmt->bindValue(":" . $key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
     }
-
     $productsStmt->bindValue(":limit", $limit, PDO::PARAM_INT);
     $productsStmt->execute();
 
@@ -262,24 +234,29 @@ try {
 
     $products = [];
     foreach ($rows as $row) {
-        $rawPrice = (float) ($row["appraisal_value"] ?? 0);
+        $rawPrice = (float)($row["display_price"] > 0 ? $row["display_price"] : $row["appraisal_value"]);
 
         $badge = null;
-        if ($rawPrice >= 50000) {
+        if ((int)$row["is_featured"] === 1) {
+            $badge = "Featured";
+        } elseif ($rawPrice >= 50000) {
             $badge = "Premium";
         } elseif ($rawPrice >= 20000) {
             $badge = "Popular";
         }
 
         $products[] = [
-            "id" => (string) $row["id"],
-            "name" => (string) $row["item_name"],
-            "category" => (string) ($row["item_category"] ?? "General"),
-            "price" => "$" . number_format($rawPrice, 2),
-            "raw_price" => number_format($rawPrice, 2, '.', ''),
-            "image" => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
-            "badge" => $badge,
-            "description" => (string) ($row["item_category"] ?? "General") . " item available for purchase",
+            "id"          => (string) $row["id"],
+            "name"        => (string) $row["item_name"],
+            "category"    => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General"),
+            "category_icon" => (string) ($row["cat_icon"] ?? mapCategoryIcon($row["item_category"] ?? "")),
+            "price"       => "₱" . number_format($rawPrice, 2),
+            "raw_price"   => number_format($rawPrice, 2, '.', ''),
+            "image"       => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
+            "badge"       => $badge,
+            "stock_qty"   => (int) $row["stock_qty"],
+            "condition"   => (string) ($row["condition_notes"] ?? ""),
+            "description" => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
         ];
     }
 
