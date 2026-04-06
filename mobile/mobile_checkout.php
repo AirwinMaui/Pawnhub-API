@@ -1,8 +1,29 @@
 <?php
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Content-Type: application/json');
+
+$method = $_SERVER['REQUEST_METHOD'] ?? '';
+
+if ($method === 'OPTIONS') {
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'message' => 'Preflight OK'
+    ]);
+    exit;
+}
+
+if ($method !== 'POST') {
+    http_response_code(405);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Method not allowed',
+        'request_method' => $method
+    ]);
+    exit;
+}
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
