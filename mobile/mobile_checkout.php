@@ -36,8 +36,11 @@ if ($method !== 'POST') {
 
 try {
     error_log('CHECKOUT: started');
+    error_log('CHECKOUT: before require db');
 
     require_once __DIR__ . '/../db.php';
+
+    error_log('CHECKOUT: after require db');
 
     if (!isset($pdo) || !($pdo instanceof PDO)) {
         respond(500, [
@@ -87,6 +90,8 @@ try {
     $pdo->beginTransaction();
     error_log('CHECKOUT: transaction started');
 
+    error_log('CHECKOUT: before customer query');
+
     $custStmt = $pdo->prepare("
         SELECT id, full_name, tenant_id
         FROM customers
@@ -110,26 +115,7 @@ try {
 
     error_log('CHECKOUT: customer found');
 
-    $userStmt = $pdo->prepare("
-        SELECT id
-        FROM users
-        WHERE id = :user_id
-        LIMIT 1
-    ");
-    $userStmt->execute([
-        ':user_id' => $customerId,
-    ]);
-    $user = $userStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$user) {
-        $pdo->rollBack();
-        respond(400, [
-            'success' => false,
-            'message' => 'Matching user record not found for this customer'
-        ]);
-    }
-
-    error_log('CHECKOUT: user found');
+    error_log('CHECKOUT: before product query');
 
     $productStmt = $pdo->prepare("
         SELECT
@@ -213,7 +199,7 @@ try {
             :user_id,
             :order_number,
             :total_amount,
-            'paid',
+            :status,
             NOW()
         )
     ");
@@ -222,10 +208,13 @@ try {
         ':user_id' => $customerId,
         ':order_number' => $orderNumber,
         ':total_amount' => $lineTotal,
+        ':status' => 'paid',
     ]);
 
     $orderId = (int)$pdo->lastInsertId();
     error_log('CHECKOUT: order inserted id=' . $orderId);
+
+    error_log('CHECKOUT: before shop_order_items insert');
 
     $orderItemStmt = $pdo->prepare("
         INSERT INTO shop_order_items (
@@ -256,6 +245,8 @@ try {
     ]);
 
     error_log('CHECKOUT: order item inserted');
+
+    error_log('CHECKOUT: before stock update');
 
     $updateStockStmt = $pdo->prepare("
         UPDATE item_inventory
@@ -303,6 +294,7 @@ try {
     error_log('CHECKOUT ERROR: ' . $e->getMessage());
     error_log('CHECKOUT FILE: ' . $e->getFile());
     error_log('CHECKOUT LINE: ' . $e->getLine());
+    error_log('CHECKOUT TRACE: ' . $e->getTraceAsString());
 
     respond(500, [
         'success' => false,
