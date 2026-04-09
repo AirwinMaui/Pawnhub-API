@@ -1,4 +1,6 @@
 <?php
+ob_start();
+
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
@@ -25,24 +27,10 @@ if ($method !== 'POST') {
     exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit;
-}
-
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Method not allowed'
-    ]);
-    exit;
-}
-
 require __DIR__ . '/../db.php';
 
 try {
-    $data = json_decode(file_get_contents('php://input'), true);
+    $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
     $customerId = (int)($data['customer_id'] ?? 0);
     $tenantId = (int)($data['tenant_id'] ?? 0);
@@ -210,7 +198,7 @@ try {
     exit;
 
 } catch (Throwable $e) {
-    if ($pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
