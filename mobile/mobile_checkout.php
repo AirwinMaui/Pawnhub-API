@@ -220,11 +220,16 @@ try {
         $pdo->rollBack();
     }
 
+    error_log('CHECKOUT ERROR: ' . $e->getMessage());
+    error_log('CHECKOUT TRACE: ' . $e->getTraceAsString());
+
     http_response_code(500);
     echo json_encode([
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
+        'line' => $e->getLine(),
+        'file' => $e->getFile(),
     ]);
     exit;
 }
