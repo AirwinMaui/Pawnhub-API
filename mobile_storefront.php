@@ -145,7 +145,6 @@ try {
         ]);
     }
 
-    // Use shop_categories table for proper categories
     $catStmt = $pdo->prepare("
         SELECT id, name AS label, icon
         FROM shop_categories
@@ -164,7 +163,6 @@ try {
         ];
     }
 
-    // Featured: prefer is_featured=1, fallback to highest display_price
     $featuredStmt = $pdo->prepare("
         SELECT
             i.id, i.item_name, i.item_category, i.item_photo_path,
@@ -194,7 +192,7 @@ try {
         ];
     }
 
-    $selectedCategoryId = $categoryId; // use category_id directly in query
+    $selectedCategoryId = $categoryId;
 
     $sql = "
         SELECT
@@ -246,17 +244,17 @@ try {
         }
 
         $products[] = [
-            "id"          => (string) $row["id"],
-            "name"        => (string) $row["item_name"],
-            "category"    => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General"),
+            "id"            => (string) $row["id"],
+            "name"          => (string) $row["item_name"],
+            "category"      => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General"),
             "category_icon" => (string) ($row["cat_icon"] ?? mapCategoryIcon($row["item_category"] ?? "")),
-            "price"       => "₱" . number_format($rawPrice, 2),
-            "raw_price"   => number_format($rawPrice, 2, '.', ''),
-            "image"       => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
-            "badge"       => $badge,
-            "stock_qty"   => (int) $row["stock_qty"],
-            "condition"   => (string) ($row["condition_notes"] ?? ""),
-            "description" => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
+            "price"         => "₱" . number_format($rawPrice, 2),
+            "raw_price"     => number_format($rawPrice, 2, '.', ''),
+            "image"         => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
+            "badge"         => $badge,
+            "stock_qty"     => (int) $row["stock_qty"],
+            "condition"     => (string) ($row["condition_notes"] ?? ""),
+            "description"   => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
         ];
     }
 

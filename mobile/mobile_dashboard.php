@@ -1,38 +1,48 @@
 <?php
 ob_start();
 
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 error_reporting(E_ALL);
 
+header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json');
+
+function respond(int $statusCode, array $payload): void
+{
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 $method = $_SERVER['REQUEST_METHOD'] ?? '';
 
 if ($method === 'OPTIONS') {
-    http_response_code(200);
-    echo json_encode([
+    respond(200, [
         'success' => true,
         'message' => 'Preflight OK'
     ]);
-    exit;
 }
 
 if ($method !== 'POST') {
-    http_response_code(405);
-    echo json_encode([
+    respond(405, [
         'success' => false,
         'message' => 'Method not allowed',
         'request_method' => $method
     ]);
-    exit;
 }
 
 try {
-    require __DIR__ . '/../db.php';
+    require_once __DIR__ . '/../db.php';
+
+    if (!isset($pdo) || !($pdo instanceof PDO)) {
+        respond(500, [
+            'success' => false,
+            'message' => 'PDO missing'
+        ]);
+    }
 
     $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
@@ -40,12 +50,10 @@ try {
     $tenantId = (int)($data['tenant_id'] ?? 0);
 
     if ($customerId <= 0 || $tenantId <= 0) {
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Missing customer_id or tenant_id'
         ]);
-        exit;
     }
 
     $customerStmt = $pdo->prepare("
@@ -69,12 +77,10 @@ try {
     $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
-        http_response_code(404);
-        echo json_encode([
+        respond(404, [
             'success' => false,
             'message' => 'Customer not found'
         ]);
-        exit;
     }
 
     $summaryStmt = $pdo->prepare("
@@ -123,7 +129,7 @@ try {
     ]);
     $renewal = $renewalStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
-    echo json_encode([
+    respond(200, [
         'success' => true,
         'customer' => [
             'id' => (int)$customer['id'],
@@ -144,20 +150,17 @@ try {
             'total_active_loan_amount' => (float)($summary['total_active_loan_amount'] ?? 0),
         ],
     ]);
-    exit;
 
 } catch (Throwable $e) {
     error_log('DASHBOARD ERROR: ' . $e->getMessage());
     error_log('DASHBOARD FILE: ' . $e->getFile());
     error_log('DASHBOARD LINE: ' . $e->getLine());
 
-    http_response_code(500);
-    echo json_encode([
+    respond(500, [
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
         'file' => basename($e->getFile()),
         'line' => $e->getLine(),
     ]);
-    exit;
 }

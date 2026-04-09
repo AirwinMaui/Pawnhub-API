@@ -1,45 +1,62 @@
 <?php
 ob_start();
 
-ini_set('display_errors', 0);
-ini_set('log_errors', 1);
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
 error_reporting(E_ALL);
 
+header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json');
+
+function respond(int $statusCode, array $payload): void
+{
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
 $method = $_SERVER['REQUEST_METHOD'] ?? '';
 
 if ($method === 'OPTIONS') {
-    http_response_code(200);
-    echo json_encode([
+    respond(200, [
         'success' => true,
         'message' => 'Preflight OK'
     ]);
-    exit;
 }
 
 if ($method !== 'POST') {
-    http_response_code(405);
-    echo json_encode([
+    respond(405, [
         'success' => false,
         'message' => 'Method not allowed',
         'request_method' => $method
     ]);
-    exit;
 }
 
 try {
     error_log('CHECKOUT: started');
 
-    require __DIR__ . '/../db.php';
+    require_once __DIR__ . '/../db.php';
+
+    if (!isset($pdo) || !($pdo instanceof PDO)) {
+        respond(500, [
+            'success' => false,
+            'message' => 'PDO missing'
+        ]);
+    }
 
     $rawInput = file_get_contents('php://input');
-    $data = json_decode($rawInput, true) ?? [];
+    $data = json_decode($rawInput, true);
 
-    error_log('CHECKOUT: payload parsed ' . $rawInput);
+    error_log('CHECKOUT: raw input = ' . $rawInput);
+
+    if (!is_array($data)) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Invalid JSON payload'
+        ]);
+    }
 
     $customerId = (int)($data['customer_id'] ?? 0);
     $tenantId = (int)($data['tenant_id'] ?? 0);
@@ -54,24 +71,21 @@ try {
     $postalCode = trim((string)($data['postal_code'] ?? ''));
 
     if ($customerId <= 0 || $tenantId <= 0 || $productId <= 0) {
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Missing customer_id, tenant_id, or product_id'
         ]);
-        exit;
     }
 
     if ($paymentMethod === '') {
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Missing payment_method'
         ]);
-        exit;
     }
 
     $pdo->beginTransaction();
+    error_log('CHECKOUT: transaction started');
 
     $custStmt = $pdo->prepare("
         SELECT id, full_name, tenant_id
@@ -88,12 +102,10 @@ try {
 
     if (!$customer) {
         $pdo->rollBack();
-        http_response_code(404);
-        echo json_encode([
+        respond(404, [
             'success' => false,
             'message' => 'Customer not found'
         ]);
-        exit;
     }
 
     error_log('CHECKOUT: customer found');
@@ -111,12 +123,10 @@ try {
 
     if (!$user) {
         $pdo->rollBack();
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Matching user record not found for this customer'
         ]);
-        exit;
     }
 
     error_log('CHECKOUT: user found');
@@ -126,6 +136,7 @@ try {
             id,
             item_name,
             display_price,
+            appraisal_value,
             stock_qty,
             is_shop_visible,
             status
@@ -143,53 +154,51 @@ try {
 
     if (!$product) {
         $pdo->rollBack();
-        http_response_code(404);
-        echo json_encode([
+        respond(404, [
             'success' => false,
             'message' => 'Product not found'
         ]);
-        exit;
     }
 
     error_log('CHECKOUT: product found');
 
     if ((int)$product['is_shop_visible'] !== 1) {
         $pdo->rollBack();
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Item is not available in shop'
         ]);
-        exit;
     }
 
     $currentStock = (int)($product['stock_qty'] ?? 0);
 
     if ($currentStock < $quantity) {
         $pdo->rollBack();
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Insufficient stock'
         ]);
-        exit;
     }
 
-    $unitPrice = (float)($product['display_price'] ?? 0);
+    $unitPrice = (float)(
+        ((float)($product['display_price'] ?? 0) > 0)
+            ? $product['display_price']
+            : ($product['appraisal_value'] ?? 0)
+    );
 
     if ($unitPrice <= 0) {
         $pdo->rollBack();
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
             'message' => 'Invalid item price'
         ]);
-        exit;
     }
 
     $lineTotal = $unitPrice * $quantity;
     $remainingStock = $currentStock - $quantity;
     $orderNumber = 'ORD-' . date('YmdHis') . '-' . mt_rand(1000, 9999);
+
+    error_log('CHECKOUT: before shop_orders insert');
 
     $orderStmt = $pdo->prepare("
         INSERT INTO shop_orders (
@@ -216,8 +225,7 @@ try {
     ]);
 
     $orderId = (int)$pdo->lastInsertId();
-
-    error_log('CHECKOUT: order inserted');
+    error_log('CHECKOUT: order inserted id=' . $orderId);
 
     $orderItemStmt = $pdo->prepare("
         INSERT INTO shop_order_items (
@@ -264,10 +272,9 @@ try {
     error_log('CHECKOUT: stock updated');
 
     $pdo->commit();
-
     error_log('CHECKOUT: committed');
 
-    echo json_encode([
+    respond(200, [
         'success' => true,
         'message' => 'Checkout successful',
         'order_id' => $orderId,
@@ -276,8 +283,8 @@ try {
         'product_name' => $product['item_name'],
         'quantity' => $quantity,
         'remaining_stock' => $remainingStock,
-        'unit_price' => $unitPrice,
-        'total_amount' => $lineTotal,
+        'unit_price' => number_format($unitPrice, 2, '.', ''),
+        'total_amount' => number_format($lineTotal, 2, '.', ''),
         'delivery' => [
             'full_name' => $fullName !== '' ? $fullName : ($customer['full_name'] ?? ''),
             'street_address' => $streetAddress,
@@ -287,25 +294,21 @@ try {
             'reference_number' => $referenceNumber,
         ],
     ]);
-    exit;
 
 } catch (Throwable $e) {
-    if (isset($pdo) && $pdo->inTransaction()) {
+    if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
     error_log('CHECKOUT ERROR: ' . $e->getMessage());
     error_log('CHECKOUT FILE: ' . $e->getFile());
     error_log('CHECKOUT LINE: ' . $e->getLine());
-    error_log('CHECKOUT TRACE: ' . $e->getTraceAsString());
 
-    http_response_code(500);
-    echo json_encode([
+    respond(500, [
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
         'file' => basename($e->getFile()),
         'line' => $e->getLine(),
     ]);
-    exit;
 }
