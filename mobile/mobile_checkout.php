@@ -1,6 +1,10 @@
 <?php
 ob_start();
 
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+error_reporting(E_ALL);
+
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
@@ -28,20 +32,41 @@ if ($method !== 'POST') {
 }
 
 try {
+    error_log('CHECKOUT: started');
+
     require __DIR__ . '/../db.php';
 
-    $data = json_decode(file_get_contents('php://input'), true) ?? [];
+    $rawInput = file_get_contents('php://input');
+    $data = json_decode($rawInput, true) ?? [];
+
+    error_log('CHECKOUT: payload parsed ' . $rawInput);
 
     $customerId = (int)($data['customer_id'] ?? 0);
     $tenantId = (int)($data['tenant_id'] ?? 0);
     $productId = (int)($data['product_id'] ?? 0);
     $quantity = max(1, (int)($data['quantity'] ?? 1));
 
+    $paymentMethod = trim((string)($data['payment_method'] ?? ''));
+    $referenceNumber = trim((string)($data['reference_number'] ?? ''));
+    $fullName = trim((string)($data['full_name'] ?? ''));
+    $streetAddress = trim((string)($data['street_address'] ?? ''));
+    $city = trim((string)($data['city'] ?? ''));
+    $postalCode = trim((string)($data['postal_code'] ?? ''));
+
     if ($customerId <= 0 || $tenantId <= 0 || $productId <= 0) {
         http_response_code(400);
         echo json_encode([
             'success' => false,
             'message' => 'Missing customer_id, tenant_id, or product_id'
+        ]);
+        exit;
+    }
+
+    if ($paymentMethod === '') {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Missing payment_method'
         ]);
         exit;
     }
@@ -71,8 +96,39 @@ try {
         exit;
     }
 
+    error_log('CHECKOUT: customer found');
+
+    $userStmt = $pdo->prepare("
+        SELECT id
+        FROM users
+        WHERE id = :user_id
+        LIMIT 1
+    ");
+    $userStmt->execute([
+        ':user_id' => $customerId,
+    ]);
+    $user = $userStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$user) {
+        $pdo->rollBack();
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Matching user record not found for this customer'
+        ]);
+        exit;
+    }
+
+    error_log('CHECKOUT: user found');
+
     $productStmt = $pdo->prepare("
-        SELECT id, item_name, display_price, stock_qty, is_shop_visible, status
+        SELECT
+            id,
+            item_name,
+            display_price,
+            stock_qty,
+            is_shop_visible,
+            status
         FROM item_inventory
         WHERE id = :product_id
           AND tenant_id = :tenant_id
@@ -94,6 +150,8 @@ try {
         ]);
         exit;
     }
+
+    error_log('CHECKOUT: product found');
 
     if ((int)$product['is_shop_visible'] !== 1) {
         $pdo->rollBack();
@@ -159,6 +217,8 @@ try {
 
     $orderId = (int)$pdo->lastInsertId();
 
+    error_log('CHECKOUT: order inserted');
+
     $orderItemStmt = $pdo->prepare("
         INSERT INTO shop_order_items (
             tenant_id,
@@ -187,6 +247,8 @@ try {
         ':line_total' => $lineTotal,
     ]);
 
+    error_log('CHECKOUT: order item inserted');
+
     $updateStockStmt = $pdo->prepare("
         UPDATE item_inventory
         SET stock_qty = :stock_qty
@@ -199,7 +261,11 @@ try {
         ':tenant_id' => $tenantId,
     ]);
 
+    error_log('CHECKOUT: stock updated');
+
     $pdo->commit();
+
+    error_log('CHECKOUT: committed');
 
     echo json_encode([
         'success' => true,
@@ -212,6 +278,14 @@ try {
         'remaining_stock' => $remainingStock,
         'unit_price' => $unitPrice,
         'total_amount' => $lineTotal,
+        'delivery' => [
+            'full_name' => $fullName !== '' ? $fullName : ($customer['full_name'] ?? ''),
+            'street_address' => $streetAddress,
+            'city' => $city,
+            'postal_code' => $postalCode,
+            'payment_method' => $paymentMethod,
+            'reference_number' => $referenceNumber,
+        ],
     ]);
     exit;
 
@@ -221,6 +295,8 @@ try {
     }
 
     error_log('CHECKOUT ERROR: ' . $e->getMessage());
+    error_log('CHECKOUT FILE: ' . $e->getFile());
+    error_log('CHECKOUT LINE: ' . $e->getLine());
     error_log('CHECKOUT TRACE: ' . $e->getTraceAsString());
 
     http_response_code(500);
@@ -228,8 +304,8 @@ try {
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
+        'file' => basename($e->getFile()),
         'line' => $e->getLine(),
-        'file' => $e->getFile(),
     ]);
     exit;
 }

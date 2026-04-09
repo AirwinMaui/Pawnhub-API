@@ -1,26 +1,37 @@
 <?php
 ob_start();
 
+ini_set('display_errors', 0);
+ini_set('log_errors', 1);
+error_reporting(E_ALL);
+
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Content-Type: application/json');
 
+$method = $_SERVER['REQUEST_METHOD'] ?? '';
+
+if ($method === 'OPTIONS') {
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'message' => 'Preflight OK'
+    ]);
+    exit;
+}
+
+if ($method !== 'POST') {
+    http_response_code(405);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Method not allowed',
+        'request_method' => $method
+    ]);
+    exit;
+}
+
 try {
-    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'OPTIONS') {
-        http_response_code(200);
-        exit;
-    }
-
-    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
-        http_response_code(405);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Method not allowed'
-        ]);
-        exit;
-    }
-
     require __DIR__ . '/../db.php';
 
     $data = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -38,7 +49,13 @@ try {
     }
 
     $customerStmt = $pdo->prepare("
-        SELECT c.contact_number, c.email, t.business_name, t.tenant_code
+        SELECT
+            c.id,
+            c.full_name,
+            c.contact_number,
+            c.email,
+            t.business_name,
+            t.tenant_code
         FROM customers c
         JOIN tenants t ON c.tenant_id = t.id
         WHERE c.id = :customer_id
@@ -63,10 +80,26 @@ try {
     $summaryStmt = $pdo->prepare("
         SELECT
             COUNT(*) AS total_transactions,
-            SUM(CASE WHEN LOWER(status) IN ('stored', 'active') THEN 1 ELSE 0 END) AS active_transactions,
+            SUM(CASE WHEN LOWER(status) IN ('stored', 'active', 'pawned') THEN 1 ELSE 0 END) AS active_transactions,
             SUM(CASE WHEN LOWER(status) = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_transactions,
-            SUM(CASE WHEN expiry_date < CURDATE() AND LOWER(status) NOT IN ('redeemed', 'released') THEN 1 ELSE 0 END) AS overdue_transactions,
-            COALESCE(SUM(CASE WHEN LOWER(status) IN ('stored', 'active') THEN loan_amount ELSE 0 END), 0) AS total_active_loan_amount
+            SUM(
+                CASE
+                    WHEN expiry_date < CURDATE()
+                     AND LOWER(status) NOT IN ('redeemed', 'released')
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS overdue_transactions,
+            COALESCE(
+                SUM(
+                    CASE
+                        WHEN LOWER(status) IN ('stored', 'active', 'pawned')
+                        THEN loan_amount
+                        ELSE 0
+                    END
+                ),
+                0
+            ) AS total_active_loan_amount
         FROM pawn_transactions
         WHERE tenant_id = :tenant_id
           AND contact_number = :contact_number
@@ -75,7 +108,7 @@ try {
         ':tenant_id' => $tenantId,
         ':contact_number' => $customer['contact_number'],
     ]);
-    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC);
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $renewalStmt = $pdo->prepare("
         SELECT COUNT(*) AS pending_renewals
@@ -88,12 +121,18 @@ try {
         ':tenant_id' => $tenantId,
         ':contact_number' => $customer['contact_number'],
     ]);
-    $renewal = $renewalStmt->fetch(PDO::FETCH_ASSOC);
+    $renewal = $renewalStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     echo json_encode([
         'success' => true,
+        'customer' => [
+            'id' => (int)$customer['id'],
+            'name' => $customer['full_name'],
+            'contact_number' => $customer['contact_number'],
+            'email' => $customer['email'],
+        ],
         'tenant' => [
-            'tenant_code' => (int)$customer['tenant_code'],
+            'tenant_code' => (string)$customer['tenant_code'],
             'name' => $customer['business_name'],
         ],
         'summary' => [
@@ -108,11 +147,17 @@ try {
     exit;
 
 } catch (Throwable $e) {
+    error_log('DASHBOARD ERROR: ' . $e->getMessage());
+    error_log('DASHBOARD FILE: ' . $e->getFile());
+    error_log('DASHBOARD LINE: ' . $e->getLine());
+
     http_response_code(500);
     echo json_encode([
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
+        'file' => basename($e->getFile()),
+        'line' => $e->getLine(),
     ]);
     exit;
 }
