@@ -27,21 +27,15 @@ if ($method !== 'POST') {
     exit;
 }
 
-require __DIR__ . '/../db.php';
-
 try {
+    require __DIR__ . '/../db.php';
+
     $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
     $customerId = (int)($data['customer_id'] ?? 0);
     $tenantId = (int)($data['tenant_id'] ?? 0);
     $productId = (int)($data['product_id'] ?? 0);
     $quantity = max(1, (int)($data['quantity'] ?? 1));
-    $paymentMethod = trim($data['payment_method'] ?? '');
-    $referenceNumber = trim($data['reference_number'] ?? '');
-    $fullName = trim($data['full_name'] ?? '');
-    $streetAddress = trim($data['street_address'] ?? '');
-    $city = trim($data['city'] ?? '');
-    $postalCode = trim($data['postal_code'] ?? '');
 
     if ($customerId <= 0 || $tenantId <= 0 || $productId <= 0) {
         http_response_code(400);
@@ -52,21 +46,13 @@ try {
         exit;
     }
 
-    if ($paymentMethod === '') {
-        http_response_code(400);
-        echo json_encode([
-            'success' => false,
-            'message' => 'Missing payment_method'
-        ]);
-        exit;
-    }
-
     $pdo->beginTransaction();
 
     $custStmt = $pdo->prepare("
-        SELECT id, full_name, contact_number
+        SELECT id, full_name, tenant_id
         FROM customers
-        WHERE id = :customer_id AND tenant_id = :tenant_id
+        WHERE id = :customer_id
+          AND tenant_id = :tenant_id
         LIMIT 1
     ");
     $custStmt->execute([
@@ -86,9 +72,10 @@ try {
     }
 
     $productStmt = $pdo->prepare("
-        SELECT id, name, price, stock
-        FROM products
-        WHERE id = :product_id AND tenant_id = :tenant_id
+        SELECT id, item_name, display_price, stock_qty, is_shop_visible, status
+        FROM item_inventory
+        WHERE id = :product_id
+          AND tenant_id = :tenant_id
         LIMIT 1
         FOR UPDATE
     ");
@@ -108,7 +95,17 @@ try {
         exit;
     }
 
-    $currentStock = (int)($product['stock'] ?? 0);
+    if ((int)$product['is_shop_visible'] !== 1) {
+        $pdo->rollBack();
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Item is not available in shop'
+        ]);
+        exit;
+    }
+
+    $currentStock = (int)($product['stock_qty'] ?? 0);
 
     if ($currentStock < $quantity) {
         $pdo->rollBack();
@@ -120,70 +117,87 @@ try {
         exit;
     }
 
-    $unitPrice = (float)($product['price'] ?? 0);
-    $totalAmount = $unitPrice * $quantity;
-    $remainingStock = $currentStock - $quantity;
+    $unitPrice = (float)($product['display_price'] ?? 0);
 
-    $updateStockStmt = $pdo->prepare("
-        UPDATE products
-        SET stock = :stock
-        WHERE id = :product_id AND tenant_id = :tenant_id
-    ");
-    $updateStockStmt->execute([
-        ':stock' => $remainingStock,
-        ':product_id' => $productId,
-        ':tenant_id' => $tenantId,
-    ]);
+    if ($unitPrice <= 0) {
+        $pdo->rollBack();
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid item price'
+        ]);
+        exit;
+    }
+
+    $lineTotal = $unitPrice * $quantity;
+    $remainingStock = $currentStock - $quantity;
+    $orderNumber = 'ORD-' . date('YmdHis') . '-' . mt_rand(1000, 9999);
 
     $orderStmt = $pdo->prepare("
-        INSERT INTO orders (
+        INSERT INTO shop_orders (
             tenant_id,
-            customer_id,
-            product_id,
-            quantity,
-            unit_price,
+            user_id,
+            order_number,
             total_amount,
-            payment_method,
-            reference_number,
-            full_name,
-            street_address,
-            city,
-            postal_code,
             status,
             created_at
         ) VALUES (
             :tenant_id,
-            :customer_id,
-            :product_id,
-            :quantity,
-            :unit_price,
+            :user_id,
+            :order_number,
             :total_amount,
-            :payment_method,
-            :reference_number,
-            :full_name,
-            :street_address,
-            :city,
-            :postal_code,
             'paid',
             NOW()
         )
     ");
     $orderStmt->execute([
         ':tenant_id' => $tenantId,
-        ':customer_id' => $customerId,
-        ':product_id' => $productId,
-        ':quantity' => $quantity,
-        ':unit_price' => $unitPrice,
-        ':total_amount' => $totalAmount,
-        ':payment_method' => $paymentMethod,
-        ':reference_number' => $referenceNumber,
-        ':full_name' => $fullName !== '' ? $fullName : ($customer['full_name'] ?? ''),
-        ':street_address' => $streetAddress,
-        ':city' => $city,
-        ':postal_code' => $postalCode,
+        ':user_id' => $customerId,
+        ':order_number' => $orderNumber,
+        ':total_amount' => $lineTotal,
     ]);
 
-    $orderId = $pdo->lastInsertId();
+    $orderId = (int)$pdo->lastInsertId();
+
+    $orderItemStmt = $pdo->prepare("
+        INSERT INTO shop_order_items (
+            tenant_id,
+            order_id,
+            inventory_item_id,
+            quantity,
+            unit_price,
+            line_total,
+            created_at
+        ) VALUES (
+            :tenant_id,
+            :order_id,
+            :inventory_item_id,
+            :quantity,
+            :unit_price,
+            :line_total,
+            NOW()
+        )
+    ");
+    $orderItemStmt->execute([
+        ':tenant_id' => $tenantId,
+        ':order_id' => $orderId,
+        ':inventory_item_id' => $productId,
+        ':quantity' => $quantity,
+        ':unit_price' => $unitPrice,
+        ':line_total' => $lineTotal,
+    ]);
+
+    $updateStockStmt = $pdo->prepare("
+        UPDATE item_inventory
+        SET stock_qty = :stock_qty
+        WHERE id = :product_id
+          AND tenant_id = :tenant_id
+    ");
+    $updateStockStmt->execute([
+        ':stock_qty' => $remainingStock,
+        ':product_id' => $productId,
+        ':tenant_id' => $tenantId,
+    ]);
 
     $pdo->commit();
 
@@ -191,9 +205,13 @@ try {
         'success' => true,
         'message' => 'Checkout successful',
         'order_id' => $orderId,
+        'order_number' => $orderNumber,
         'product_id' => $productId,
+        'product_name' => $product['item_name'],
+        'quantity' => $quantity,
         'remaining_stock' => $remainingStock,
-        'total_amount' => $totalAmount,
+        'unit_price' => $unitPrice,
+        'total_amount' => $lineTotal,
     ]);
     exit;
 
