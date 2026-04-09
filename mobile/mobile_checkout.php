@@ -36,10 +36,7 @@ if ($method !== 'POST') {
 
 try {
     error_log('CHECKOUT: started');
-    error_log('CHECKOUT: before require db');
-
     require_once __DIR__ . '/../db.php';
-
     error_log('CHECKOUT: after require db');
 
     if (!isset($pdo) || !($pdo instanceof PDO)) {
@@ -87,10 +84,15 @@ try {
         ]);
     }
 
+    if ($fullName === '' || $streetAddress === '' || $city === '' || $postalCode === '') {
+        respond(400, [
+            'success' => false,
+            'message' => 'Missing shipping information'
+        ]);
+    }
+
     $pdo->beginTransaction();
     error_log('CHECKOUT: transaction started');
-
-    error_log('CHECKOUT: before customer query');
 
     $custStmt = $pdo->prepare("
         SELECT id, full_name, tenant_id
@@ -112,10 +114,6 @@ try {
             'message' => 'Customer not found'
         ]);
     }
-
-    error_log('CHECKOUT: customer found');
-
-    error_log('CHECKOUT: before product query');
 
     $productStmt = $pdo->prepare("
         SELECT
@@ -145,8 +143,6 @@ try {
             'message' => 'Product not found'
         ]);
     }
-
-    error_log('CHECKOUT: product found');
 
     if ((int)$product['is_shop_visible'] !== 1) {
         $pdo->rollBack();
@@ -180,7 +176,11 @@ try {
         ]);
     }
 
-    $lineTotal = $unitPrice * $quantity;
+    $subtotal = $unitPrice * $quantity;
+    $shippingFee = 0.00;
+    $taxAmount = 0.00;
+    $totalAmount = $subtotal + $shippingFee + $taxAmount;
+
     $remainingStock = $currentStock - $quantity;
     $orderNumber = 'ORD-' . date('YmdHis') . '-' . mt_rand(1000, 9999);
 
@@ -189,26 +189,72 @@ try {
     $orderStmt = $pdo->prepare("
         INSERT INTO shop_orders (
             tenant_id,
+            customer_id,
             user_id,
             order_number,
+            customer_name,
+            shipping_full_name,
+            shipping_street_address,
+            shipping_city,
+            shipping_postal_code,
+            subtotal,
+            shipping_fee,
+            tax_amount,
             total_amount,
+            payment_method,
+            payment_status,
+            payment_reference_number,
+            paid_at,
+            fulfillment_status,
             status,
-            created_at
+            notes,
+            created_at,
+            updated_at
         ) VALUES (
             :tenant_id,
+            :customer_id,
             :user_id,
             :order_number,
+            :customer_name,
+            :shipping_full_name,
+            :shipping_street_address,
+            :shipping_city,
+            :shipping_postal_code,
+            :subtotal,
+            :shipping_fee,
+            :tax_amount,
             :total_amount,
+            :payment_method,
+            :payment_status,
+            :payment_reference_number,
+            NOW(),
+            :fulfillment_status,
             :status,
+            :notes,
+            NOW(),
             NOW()
         )
     ");
     $orderStmt->execute([
         ':tenant_id' => $tenantId,
+        ':customer_id' => $customerId,
         ':user_id' => $customerId,
         ':order_number' => $orderNumber,
-        ':total_amount' => $lineTotal,
+        ':customer_name' => $customer['full_name'] ?? $fullName,
+        ':shipping_full_name' => $fullName,
+        ':shipping_street_address' => $streetAddress,
+        ':shipping_city' => $city,
+        ':shipping_postal_code' => $postalCode,
+        ':subtotal' => $subtotal,
+        ':shipping_fee' => $shippingFee,
+        ':tax_amount' => $taxAmount,
+        ':total_amount' => $totalAmount,
+        ':payment_method' => $paymentMethod,
+        ':payment_status' => 'paid',
+        ':payment_reference_number' => $referenceNumber !== '' ? $referenceNumber : null,
+        ':fulfillment_status' => 'pending',
         ':status' => 'paid',
+        ':notes' => null,
     ]);
 
     $orderId = (int)$pdo->lastInsertId();
@@ -221,17 +267,23 @@ try {
             tenant_id,
             order_id,
             inventory_item_id,
+            product_name,
+            product_category,
             quantity,
             unit_price,
             line_total,
+            item_status,
             created_at
         ) VALUES (
             :tenant_id,
             :order_id,
             :inventory_item_id,
+            :product_name,
+            :product_category,
             :quantity,
             :unit_price,
             :line_total,
+            :item_status,
             NOW()
         )
     ");
@@ -239,14 +291,15 @@ try {
         ':tenant_id' => $tenantId,
         ':order_id' => $orderId,
         ':inventory_item_id' => $productId,
+        ':product_name' => $product['item_name'],
+        ':product_category' => 'General',
         ':quantity' => $quantity,
         ':unit_price' => $unitPrice,
-        ':line_total' => $lineTotal,
+        ':line_total' => $subtotal,
+        ':item_status' => 'active',
     ]);
 
     error_log('CHECKOUT: order item inserted');
-
-    error_log('CHECKOUT: before stock update');
 
     $updateStockStmt = $pdo->prepare("
         UPDATE item_inventory
@@ -274,15 +327,20 @@ try {
         'product_name' => $product['item_name'],
         'quantity' => $quantity,
         'remaining_stock' => $remainingStock,
-        'unit_price' => number_format($unitPrice, 2, '.', ''),
-        'total_amount' => number_format($lineTotal, 2, '.', ''),
+        'subtotal' => number_format($subtotal, 2, '.', ''),
+        'shipping_fee' => number_format($shippingFee, 2, '.', ''),
+        'tax_amount' => number_format($taxAmount, 2, '.', ''),
+        'total_amount' => number_format($totalAmount, 2, '.', ''),
+        'payment' => [
+            'method' => $paymentMethod,
+            'status' => 'paid',
+            'reference_number' => $referenceNumber,
+        ],
         'delivery' => [
-            'full_name' => $fullName !== '' ? $fullName : ($customer['full_name'] ?? ''),
+            'full_name' => $fullName,
             'street_address' => $streetAddress,
             'city' => $city,
             'postal_code' => $postalCode,
-            'payment_method' => $paymentMethod,
-            'reference_number' => $referenceNumber,
         ],
     ]);
 
