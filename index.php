@@ -1,9 +1,9 @@
 <?php
 header('Content-Type: application/json');
 
-$uri = $_SERVER['REQUEST_URI'] ?? '';
+$path = $_SERVER['PATH_INFO'] ?? '';
 
-if (strpos($uri, '/index.php/mobile/mobile_pawn_transactions.php') !== false) {
+if ($path === '/mobile/mobile_pawn_transactions.php') {
     require __DIR__ . '/mobile/mobile_pawn_transactions.php';
     exit;
 }
