@@ -1,14 +1,15 @@
 <?php
 header('Content-Type: application/json');
 
-$path = $_SERVER['PATH_INFO'] ?? '';
+$uri = $_SERVER['REQUEST_URI'] ?? '';
 
-if ($path === '/mobile/mobile_pawn_transactions.php') {
+if (strpos($uri, 'mobile_pawn_transactions.php') !== false) {
     require __DIR__ . '/mobile/mobile_pawn_transactions.php';
     exit;
 }
 
 echo json_encode([
     'success' => true,
-    'message' => 'API is live'
+    'message' => 'API is live',
+    'uri' => $uri
 ]);
