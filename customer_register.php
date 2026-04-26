@@ -47,8 +47,8 @@ if (!empty($_POST)) {
 
 $accessCode = trim((string)($data["access_code"] ?? ""));
 $fullName = trim((string)($data["full_name"] ?? $data["fullname"] ?? ""));
-$email = trim((string)($data["email"] ?? ""));
 $username = trim((string)($data["username"] ?? ""));
+$email = trim((string)($data["email"] ?? ""));
 $password = trim((string)($data["password"] ?? ""));
 $contact = trim((string)($data["contact_number"] ?? $data["phone"] ?? ""));
 
@@ -68,6 +68,20 @@ if ($fullName === "") {
     respond(400, [
         "success" => false,
         "message" => "Full name is required.",
+    ]);
+}
+
+if ($username === "") {
+    respond(400, [
+        "success" => false,
+        "message" => "Username is required.",
+    ]);
+}
+
+if (preg_match('/\s/', $username)) {
+    respond(400, [
+        "success" => false,
+        "message" => "Username cannot contain spaces.",
     ]);
 }
 
@@ -97,10 +111,6 @@ if (strlen($password) < 8) {
         "success" => false,
         "message" => "Password must be at least 8 characters.",
     ]);
-}
-
-if ($username === "") {
-    $username = $email;
 }
 
 try {
@@ -133,30 +143,30 @@ try {
 
     $tenantId = (int)$tenant["tenant_id"];
 
-    $chk = $pdo->prepare("
+    $usernameCheck = $pdo->prepare("
         SELECT id
         FROM mobile_customers
         WHERE tenant_id = ? AND username = ?
         LIMIT 1
     ");
-    $chk->execute([$tenantId, $username]);
+    $usernameCheck->execute([$tenantId, $username]);
 
-    if ($chk->fetch()) {
+    if ($usernameCheck->fetch()) {
         respond(409, [
             "success" => false,
             "message" => "Username already taken. Please choose another.",
         ]);
     }
 
-    $chkEmail = $pdo->prepare("
+    $emailCheck = $pdo->prepare("
         SELECT id
         FROM mobile_customers
         WHERE tenant_id = ? AND email = ?
         LIMIT 1
     ");
-    $chkEmail->execute([$tenantId, $email]);
+    $emailCheck->execute([$tenantId, $email]);
 
-    if ($chkEmail->fetch()) {
+    if ($emailCheck->fetch()) {
         respond(409, [
             "success" => false,
             "message" => "Email already registered in this tenant.",
@@ -165,7 +175,7 @@ try {
 
     $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
 
-    $ins = $pdo->prepare("
+    $insert = $pdo->prepare("
         INSERT INTO mobile_customers
             (
                 tenant_id,
@@ -184,7 +194,7 @@ try {
             (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
     ");
 
-    $ins->execute([
+    $insert->execute([
         $tenantId,
         $fullName,
         $username,
@@ -199,37 +209,6 @@ try {
 
     $newId = (int)$pdo->lastInsertId();
 
-    try {
-        $audit = $pdo->prepare("
-            INSERT INTO audit_logs
-                (
-                    tenant_id,
-                    actor_user_id,
-                    actor_username,
-                    actor_role,
-                    action,
-                    entity_type,
-                    entity_id,
-                    message,
-                    ip_address,
-                    created_at
-                )
-            VALUES
-                (?, ?, ?, 'mobile_customer', 'MOBILE_CUSTOMER_REGISTER', 'mobile_customer', ?, ?, ?, NOW())
-        ");
-
-        $audit->execute([
-            $tenantId,
-            $newId,
-            $username,
-            (string)$newId,
-            "Mobile customer registered: " . $fullName,
-            $_SERVER["REMOTE_ADDR"] ?? "::1",
-        ]);
-    } catch (Throwable $e) {
-        // Audit log is optional.
-    }
-
     respond(201, [
         "success" => true,
         "message" => "Registration successful! You can now log in.",
@@ -241,7 +220,7 @@ try {
             "email" => $email,
             "tenant" => [
                 "id" => $tenantId,
-                "name" => $tenant["business_name"],
+                "name" => $tenant["business_name"] ?? null,
             ],
         ],
     ]);
