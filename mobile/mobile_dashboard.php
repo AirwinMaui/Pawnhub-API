@@ -1,189 +1,109 @@
 <?php
-ob_start();
-
-ini_set('display_errors', '0');
-ini_set('log_errors', '1');
-error_reporting(E_ALL);
+declare(strict_types=1);
 
 header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 
-function respond(int $statusCode, array $payload): void
-{
-    http_response_code($statusCode);
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
     exit;
 }
 
-$method = $_SERVER['REQUEST_METHOD'] ?? '';
+require_once __DIR__ . '/../db.php';
 
-if ($method === 'OPTIONS') {
-    respond(200, [
-        'success' => true,
-        'message' => 'Preflight OK'
-    ]);
+function respond(int $statusCode, array $payload): void
+{
+    http_response_code($statusCode);
+    echo json_encode($payload);
+    exit;
 }
 
-if ($method !== 'POST') {
-    respond(405, [
-        'success' => false,
-        'message' => 'Method not allowed',
-        'request_method' => $method
-    ]);
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    respond(405, ['success' => false, 'message' => 'Method not allowed']);
 }
 
 try {
-    require_once __DIR__ . '/../db.php';
-
-    if (!isset($pdo) || !($pdo instanceof PDO)) {
-        respond(500, [
-            'success' => false,
-            'message' => 'PDO missing'
-        ]);
-    }
-
     $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
-    $customerId = (int)($data['customerId'] ?? $data['customer_id'] ?? 0);
-    $tenantId = (int)($data['tenantId'] ?? $data['tenant_id'] ?? 0);
+    $customerId = (int)($data['customerId'] ?? 0);
+    $tenantId = (int)($data['tenantId'] ?? 0);
 
     if ($customerId <= 0 || $tenantId <= 0) {
-        respond(400, [
-            'success' => false,
-            'message' => 'Missing customerId or tenantId',
-            'debug' => [
-                'customerId' => $customerId,
-                'tenantId' => $tenantId,
-                'received' => $data
-            ]
-        ]);
+        respond(400, ['success' => false, 'message' => 'Missing params']);
     }
 
-    $customerStmt = $pdo->prepare("
-        SELECT
-            c.id,
-            c.tenant_id,
-            c.full_name,
-            c.username,
-            c.contact_number,
-            c.email,
-            c.profile_photo,
-            t.business_name,
-            t.tenant_code
+    // ✅ FIX: use mobile_customers
+    $stmt = $pdo->prepare("
+        SELECT c.*, t.business_name, t.tenant_code
         FROM mobile_customers c
         JOIN tenants t ON c.tenant_id = t.id
-        WHERE c.id = :customer_id
-          AND c.tenant_id = :tenant_id
-          AND c.is_active = 1
+        WHERE c.id = ? AND c.tenant_id = ? AND c.is_active = 1
         LIMIT 1
     ");
-
-    $customerStmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
-    ]);
-
-    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
+    $stmt->execute([$customerId, $tenantId]);
+    $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
-        respond(404, [
-            'success' => false,
-            'message' => 'Customer not found',
-            'debug' => [
-                'customerId' => $customerId,
-                'tenantId' => $tenantId
-            ]
-        ]);
+        respond(404, ['success' => false, 'message' => 'Customer not found']);
     }
 
+    // Loan summary
     $summaryStmt = $pdo->prepare("
         SELECT
             COUNT(*) AS total_transactions,
-            SUM(CASE WHEN LOWER(status) IN ('stored', 'active', 'pawned') THEN 1 ELSE 0 END) AS active_transactions,
-            SUM(CASE WHEN LOWER(status) = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_transactions,
-            SUM(
-                CASE
-                    WHEN expiry_date < CURDATE()
-                     AND LOWER(status) NOT IN ('redeemed', 'released')
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS overdue_transactions,
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN LOWER(status) IN ('stored', 'active', 'pawned')
-                        THEN loan_amount
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS total_active_loan_amount
+            SUM(CASE WHEN status IN ('active','pawned','stored') THEN 1 ELSE 0 END) AS active_transactions,
+            SUM(CASE WHEN status = 'redeemed' THEN 1 ELSE 0 END) AS redeemed_transactions
         FROM pawn_transactions
-        WHERE tenant_id = :tenant_id
-          AND contact_number = :contact_number
+        WHERE tenant_id = ?
+          AND contact_number = ?
     ");
+    $summaryStmt->execute([$tenantId, $customer['contact_number']]);
+    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC);
 
-    $summaryStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':contact_number' => $customer['contact_number'],
-    ]);
-
-    $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
-
-    $renewalStmt = $pdo->prepare("
-        SELECT COUNT(*) AS pending_renewals
-        FROM renewal_requests
-        WHERE tenant_id = :tenant_id
-          AND contact_number = :contact_number
-          AND verification_status = 'pending'
+    // ✅ NEW: pending pawn requests
+    $pendingStmt = $pdo->prepare("
+        SELECT
+            id,
+            request_no,
+            item_category,
+            item_description,
+            item_condition,
+            status,
+            created_at
+        FROM pawn_requests
+        WHERE tenant_id = ?
+          AND customer_id = ?
+          AND status = 'pending'
+        ORDER BY created_at DESC
     ");
-
-    $renewalStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':contact_number' => $customer['contact_number'],
-    ]);
-
-    $renewal = $renewalStmt->fetch(PDO::FETCH_ASSOC) ?: [];
+    $pendingStmt->execute([$tenantId, $customerId]);
+    $pending = $pendingStmt->fetchAll(PDO::FETCH_ASSOC);
 
     respond(200, [
         'success' => true,
         'customer' => [
             'id' => (int)$customer['id'],
-            'tenant_id' => (int)$customer['tenant_id'],
             'name' => $customer['full_name'],
-            'username' => $customer['username'],
-            'contact_number' => $customer['contact_number'],
-            'email' => $customer['email'],
-            'profile_photo' => $customer['profile_photo'],
         ],
         'tenant' => [
             'id' => $tenantId,
-            'tenant_code' => (string)$customer['tenant_code'],
             'name' => $customer['business_name'],
         ],
         'summary' => [
             'total_transactions' => (int)($summary['total_transactions'] ?? 0),
             'active_transactions' => (int)($summary['active_transactions'] ?? 0),
             'redeemed_transactions' => (int)($summary['redeemed_transactions'] ?? 0),
-            'overdue_transactions' => (int)($summary['overdue_transactions'] ?? 0),
-            'pending_renewals' => (int)($renewal['pending_renewals'] ?? 0),
-            'total_active_loan_amount' => (float)($summary['total_active_loan_amount'] ?? 0),
+            'pending_requests' => count($pending),
         ],
+        'pending_requests' => $pending,
     ]);
 
 } catch (Throwable $e) {
-    error_log('DASHBOARD ERROR: ' . $e->getMessage());
-    error_log('DASHBOARD FILE: ' . $e->getFile());
-    error_log('DASHBOARD LINE: ' . $e->getLine());
-
     respond(500, [
         'success' => false,
         'message' => 'Server error',
         'error' => $e->getMessage(),
-        'file' => basename($e->getFile()),
-        'line' => $e->getLine(),
     ]);
 }
