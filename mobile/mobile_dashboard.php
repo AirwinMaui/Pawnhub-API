@@ -46,40 +46,55 @@ try {
 
     $data = json_decode(file_get_contents('php://input'), true) ?? [];
 
-    $customerId = (int)($data['customer_id'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? 0);
+    $customerId = (int)($data['customerId'] ?? $data['customer_id'] ?? 0);
+    $tenantId = (int)($data['tenantId'] ?? $data['tenant_id'] ?? 0);
 
     if ($customerId <= 0 || $tenantId <= 0) {
         respond(400, [
             'success' => false,
-            'message' => 'Missing customer_id or tenant_id'
+            'message' => 'Missing customerId or tenantId',
+            'debug' => [
+                'customerId' => $customerId,
+                'tenantId' => $tenantId,
+                'received' => $data
+            ]
         ]);
     }
 
     $customerStmt = $pdo->prepare("
         SELECT
             c.id,
+            c.tenant_id,
             c.full_name,
+            c.username,
             c.contact_number,
             c.email,
+            c.profile_photo,
             t.business_name,
             t.tenant_code
-        FROM customers c
+        FROM mobile_customers c
         JOIN tenants t ON c.tenant_id = t.id
         WHERE c.id = :customer_id
           AND c.tenant_id = :tenant_id
+          AND c.is_active = 1
         LIMIT 1
     ");
+
     $customerStmt->execute([
         ':customer_id' => $customerId,
         ':tenant_id' => $tenantId,
     ]);
+
     $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
         respond(404, [
             'success' => false,
-            'message' => 'Customer not found'
+            'message' => 'Customer not found',
+            'debug' => [
+                'customerId' => $customerId,
+                'tenantId' => $tenantId
+            ]
         ]);
     }
 
@@ -110,10 +125,12 @@ try {
         WHERE tenant_id = :tenant_id
           AND contact_number = :contact_number
     ");
+
     $summaryStmt->execute([
         ':tenant_id' => $tenantId,
         ':contact_number' => $customer['contact_number'],
     ]);
+
     $summary = $summaryStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     $renewalStmt = $pdo->prepare("
@@ -123,21 +140,27 @@ try {
           AND contact_number = :contact_number
           AND verification_status = 'pending'
     ");
+
     $renewalStmt->execute([
         ':tenant_id' => $tenantId,
         ':contact_number' => $customer['contact_number'],
     ]);
+
     $renewal = $renewalStmt->fetch(PDO::FETCH_ASSOC) ?: [];
 
     respond(200, [
         'success' => true,
         'customer' => [
             'id' => (int)$customer['id'],
+            'tenant_id' => (int)$customer['tenant_id'],
             'name' => $customer['full_name'],
+            'username' => $customer['username'],
             'contact_number' => $customer['contact_number'],
             'email' => $customer['email'],
+            'profile_photo' => $customer['profile_photo'],
         ],
         'tenant' => [
+            'id' => $tenantId,
             'tenant_code' => (string)$customer['tenant_code'],
             'name' => $customer['business_name'],
         ],
