@@ -175,24 +175,27 @@ try {
 
     $hashedPassword = password_hash($password, PASSWORD_BCRYPT);
 
-    $insert = $pdo->prepare("
-        INSERT INTO mobile_customers
-            (
-                tenant_id,
-                full_name,
-                username,
-                email,
-                password,
-                contact_number,
-                birthdate,
-                address,
-                gender,
-                nationality,
-                created_at
-            )
-        VALUES
-            (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-    ");
+   $insert = $pdo->prepare("
+    INSERT INTO mobile_customers
+        (
+            tenant_id,
+            full_name,
+            username,
+            email,
+            password,
+            contact_number,
+            birthdate,
+            address,
+            gender,
+            nationality,
+            profile_photo,
+            is_active,
+            created_at,
+            updated_at
+        )
+    VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 1, NOW(), NOW())
+");
 
     $insert->execute([
         $tenantId,
