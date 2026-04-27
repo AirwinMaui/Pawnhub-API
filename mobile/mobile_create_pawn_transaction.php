@@ -26,8 +26,12 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function uploadImage(string $fieldName): ?string
-{
+function uploadImageToAzure(
+    string $fieldName,
+    int $tenantId,
+    string $requestNo,
+    string $imageName
+): ?string {
     if (
         !isset($_FILES[$fieldName]) ||
         !is_array($_FILES[$fieldName]) ||
@@ -40,27 +44,72 @@ function uploadImage(string $fieldName): ?string
         throw new Exception("Upload failed for {$fieldName}");
     }
 
-    $uploadDir = __DIR__ . '/../uploads/pawn_requests/';
+    $allowedTypes = [
+        'image/jpeg' => 'jpg',
+        'image/png' => 'png',
+        'image/webp' => 'webp',
+    ];
 
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0775, true);
-    }
+    $tmpPath = $_FILES[$fieldName]['tmp_name'];
+    $mimeType = mime_content_type($tmpPath) ?: ($_FILES[$fieldName]['type'] ?? 'image/jpeg');
 
-    $extension = strtolower(pathinfo($_FILES[$fieldName]['name'], PATHINFO_EXTENSION));
-    $allowed = ['jpg', 'jpeg', 'png', 'webp'];
-
-    if (!in_array($extension, $allowed, true)) {
+    if (!isset($allowedTypes[$mimeType])) {
         throw new Exception("Invalid image type for {$fieldName}");
     }
 
-    $filename = $fieldName . '_' . date('YmdHis') . '_' . bin2hex(random_bytes(6)) . '.' . $extension;
-    $targetPath = $uploadDir . $filename;
+    $storageAccount = getenv('AZURE_STORAGE_ACCOUNT') ?: 'pawnhubstorage';
+    $container = getenv('AZURE_STORAGE_CONTAINER') ?: 'item-images';
+    $sasToken = getenv('AZURE_STORAGE_SAS_TOKEN');
 
-    if (!move_uploaded_file($_FILES[$fieldName]['tmp_name'], $targetPath)) {
-        throw new Exception("Could not save {$fieldName}");
+    if (!$sasToken) {
+        throw new Exception('Missing AZURE_STORAGE_SAS_TOKEN');
     }
 
-    return 'uploads/pawn_requests/' . $filename;
+    $sasToken = ltrim($sasToken, '?');
+
+    $extension = $allowedTypes[$mimeType];
+
+    $safeRequestNo = preg_replace('/[^A-Za-z0-9_-]/', '-', $requestNo);
+    $blobName = "tenants/{$tenantId}/pawn-requests/{$safeRequestNo}/{$imageName}.{$extension}";
+    $encodedBlobName = str_replace('%2F', '/', rawurlencode($blobName));
+
+    $uploadUrl = "https://{$storageAccount}.blob.core.windows.net/{$container}/{$encodedBlobName}?{$sasToken}";
+    $publicUrl = "https://{$storageAccount}.blob.core.windows.net/{$container}/{$encodedBlobName}";
+
+    $fileContent = file_get_contents($tmpPath);
+
+    if ($fileContent === false) {
+        throw new Exception("Unable to read uploaded file for {$fieldName}");
+    }
+
+    $ch = curl_init($uploadUrl);
+
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => 'PUT',
+        CURLOPT_POSTFIELDS => $fileContent,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_TIMEOUT => 60,
+        CURLOPT_HTTPHEADER => [
+            'x-ms-blob-type: BlockBlob',
+            'Content-Type: ' . $mimeType,
+            'Content-Length: ' . strlen($fileContent),
+        ],
+    ]);
+
+    $response = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curlError = curl_error($ch);
+
+    curl_close($ch);
+
+    if ($response === false || $httpCode < 200 || $httpCode >= 300) {
+        error_log("AZURE UPLOAD ERROR {$fieldName}: HTTP {$httpCode} {$curlError}");
+        error_log("AZURE RESPONSE {$fieldName}: " . (string)$response);
+        throw new Exception("Azure upload failed for {$fieldName}. HTTP {$httpCode}");
+    }
+
+    return $publicUrl;
 }
 
 try {
@@ -83,6 +132,17 @@ try {
         respond(400, [
             'success' => false,
             'message' => 'Missing required item details',
+        ]);
+    }
+
+    if (
+        !isset($_FILES['frontPhoto']) ||
+        !isset($_FILES['backPhoto']) ||
+        !isset($_FILES['detailPhoto'])
+    ) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Front, back, and detail photos are required',
         ]);
     }
 
@@ -109,11 +169,11 @@ try {
         ]);
     }
 
-    $frontPhoto = uploadImage('frontPhoto');
-    $backPhoto = uploadImage('backPhoto');
-    $detailPhoto = uploadImage('detailPhoto');
-
     $requestNo = 'REQ-' . date('Ymd') . '-' . random_int(1000, 9999);
+
+    $frontPhoto = uploadImageToAzure('frontPhoto', $tenantId, $requestNo, 'front');
+    $backPhoto = uploadImageToAzure('backPhoto', $tenantId, $requestNo, 'back');
+    $detailPhoto = uploadImageToAzure('detailPhoto', $tenantId, $requestNo, 'detail');
 
     $stmt = $pdo->prepare("
         INSERT INTO pawn_requests (
@@ -171,8 +231,15 @@ try {
         'message' => 'Pawn request submitted successfully',
         'request_id' => (int)$pdo->lastInsertId(),
         'request_no' => $requestNo,
+        'photos' => [
+            'front' => $frontPhoto,
+            'back' => $backPhoto,
+            'detail' => $detailPhoto,
+        ],
     ]);
 } catch (Throwable $e) {
+    error_log('CREATE PAWN REQUEST ERROR: ' . $e->getMessage());
+
     respond(500, [
         'success' => false,
         'message' => 'Server error',
