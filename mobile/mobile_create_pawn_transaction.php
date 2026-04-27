@@ -1,200 +1,181 @@
 <?php
-header('Content-Type: application/json');
+declare(strict_types=1);
+
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Content-Type: application/json; charset=UTF-8');
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(204);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    http_response_code(405);
+    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
+    exit;
+}
 
 require_once __DIR__ . '/../db.php';
 
+function respond(int $statusCode, array $payload): void
+{
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
+function uploadImage(string $fieldName): ?string
+{
+    if (
+        !isset($_FILES[$fieldName]) ||
+        !is_array($_FILES[$fieldName]) ||
+        ($_FILES[$fieldName]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE
+    ) {
+        return null;
+    }
+
+    if ($_FILES[$fieldName]['error'] !== UPLOAD_ERR_OK) {
+        throw new Exception("Upload failed for {$fieldName}");
+    }
+
+    $uploadDir = __DIR__ . '/../uploads/pawn_requests/';
+
+    if (!is_dir($uploadDir)) {
+        mkdir($uploadDir, 0775, true);
+    }
+
+    $extension = strtolower(pathinfo($_FILES[$fieldName]['name'], PATHINFO_EXTENSION));
+    $allowed = ['jpg', 'jpeg', 'png', 'webp'];
+
+    if (!in_array($extension, $allowed, true)) {
+        throw new Exception("Invalid image type for {$fieldName}");
+    }
+
+    $filename = $fieldName . '_' . date('YmdHis') . '_' . bin2hex(random_bytes(6)) . '.' . $extension;
+    $targetPath = $uploadDir . $filename;
+
+    if (!move_uploaded_file($_FILES[$fieldName]['tmp_name'], $targetPath)) {
+        throw new Exception("Could not save {$fieldName}");
+    }
+
+    return 'uploads/pawn_requests/' . $filename;
+}
+
 try {
-    $data = json_decode(file_get_contents("php://input"), true);
+    $tenantId = (int)($_POST['tenantId'] ?? $_POST['tenant_id'] ?? 0);
+    $customerId = (int)($_POST['customerId'] ?? $_POST['customer_id'] ?? 0);
 
-    if (!$data) {
-        throw new Exception("Invalid JSON body");
+    $category = trim((string)($_POST['category'] ?? ''));
+    $model = trim((string)($_POST['model'] ?? $_POST['description'] ?? ''));
+    $condition = trim((string)($_POST['condition'] ?? ''));
+    $specs = trim((string)($_POST['specs'] ?? $_POST['serial_number'] ?? ''));
+
+    if ($tenantId <= 0 || $customerId <= 0) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Missing tenantId or customerId',
+        ]);
     }
 
-    $tenantId = (int)($data['tenantId'] ?? 1);
-    $customerName = trim($data['fullName'] ?? '');
-    $category = trim($data['category'] ?? '');
-    $model = trim($data['model'] ?? '');
-    $condition = trim($data['condition'] ?? '');
-    $specs = trim($data['specs'] ?? '');
-    $loanAmount = (float)($data['loanAmount'] ?? 0);
-    $photoPath = trim($data['frontPhoto'] ?? '');
-
-    if ($category === '' || $model === '' || $loanAmount <= 0) {
-        throw new Exception("Missing required loan details");
+    if ($category === '' || $model === '' || $condition === '') {
+        respond(400, [
+            'success' => false,
+            'message' => 'Missing required item details',
+        ]);
     }
 
-    $ticketNo = 'PN-' . date('Ymd') . '-' . random_int(1000, 9999);
+    $customerStmt = $pdo->prepare("
+        SELECT id, tenant_id, full_name, contact_number
+        FROM mobile_customers
+        WHERE id = :customer_id
+          AND tenant_id = :tenant_id
+          AND is_active = 1
+        LIMIT 1
+    ");
 
-    $interestRate = 3.00;
-    $interestAmount = round($loanAmount * 0.03, 2);
-    $totalRedeem = round($loanAmount + $interestAmount, 2);
+    $customerStmt->execute([
+        ':customer_id' => $customerId,
+        ':tenant_id' => $tenantId,
+    ]);
 
-    $pawnDate = date('Y-m-d');
-    $maturityDate = date('Y-m-d', strtotime('+30 days'));
-    $expiryDate = date('Y-m-d', strtotime('+60 days'));
+    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
 
-    $pdo->beginTransaction();
+    if (!$customer) {
+        respond(404, [
+            'success' => false,
+            'message' => 'Customer not found',
+        ]);
+    }
+
+    $frontPhoto = uploadImage('frontPhoto');
+    $backPhoto = uploadImage('backPhoto');
+    $detailPhoto = uploadImage('detailPhoto');
+
+    $requestNo = 'REQ-' . date('Ymd') . '-' . random_int(1000, 9999);
 
     $stmt = $pdo->prepare("
-        INSERT INTO pawn_transactions (
+        INSERT INTO pawn_requests (
             tenant_id,
-            ticket_no,
+            customer_id,
             customer_name,
+            contact_number,
+            request_no,
             item_category,
             item_description,
             item_condition,
             serial_number,
-            appraisal_value,
-            loan_amount,
-            interest_rate,
-            interest_amount,
-            total_redeem,
-            pawn_date,
-            maturity_date,
-            expiry_date,
-            auction_eligible,
-            auction_status,
+            front_photo_path,
+            back_photo_path,
+            detail_photo_path,
             status,
-            created_by,
             created_at,
-            item_photo_path
+            updated_at
         ) VALUES (
             :tenant_id,
-            :ticket_no,
+            :customer_id,
             :customer_name,
+            :contact_number,
+            :request_no,
             :item_category,
             :item_description,
             :item_condition,
             :serial_number,
-            :appraisal_value,
-            :loan_amount,
-            :interest_rate,
-            :interest_amount,
-            :total_redeem,
-            :pawn_date,
-            :maturity_date,
-            :expiry_date,
-            0,
-            'none',
-            'active',
-            0,
+            :front_photo_path,
+            :back_photo_path,
+            :detail_photo_path,
+            'pending',
             NOW(),
-            :item_photo_path
+            NOW()
         )
     ");
 
     $stmt->execute([
         ':tenant_id' => $tenantId,
-        ':ticket_no' => $ticketNo,
-        ':customer_name' => $customerName,
+        ':customer_id' => $customerId,
+        ':customer_name' => $customer['full_name'],
+        ':contact_number' => $customer['contact_number'],
+        ':request_no' => $requestNo,
         ':item_category' => $category,
         ':item_description' => $model,
         ':item_condition' => $condition,
         ':serial_number' => $specs,
-        ':appraisal_value' => $loanAmount,
-        ':loan_amount' => $loanAmount,
-        ':interest_rate' => $interestRate,
-        ':interest_amount' => $interestAmount,
-        ':total_redeem' => $totalRedeem,
-        ':pawn_date' => $pawnDate,
-        ':maturity_date' => $maturityDate,
-        ':expiry_date' => $expiryDate,
-        ':item_photo_path' => $photoPath,
+        ':front_photo_path' => $frontPhoto,
+        ':back_photo_path' => $backPhoto,
+        ':detail_photo_path' => $detailPhoto,
     ]);
 
-    $pawnId = (int)$pdo->lastInsertId();
-
-    $stmt = $pdo->prepare("
-        INSERT INTO item_inventory (
-            tenant_id,
-            pawn_id,
-            ticket_no,
-            item_name,
-            item_category,
-            serial_no,
-            condition_notes,
-            appraisal_value,
-            loan_amount,
-            status,
-            received_at,
-            item_photo_path,
-            is_shop_visible,
-            is_featured,
-            stock_qty,
-            sort_order
-        ) VALUES (
-            :tenant_id,
-            :pawn_id,
-            :ticket_no,
-            :item_name,
-            :item_category,
-            :serial_no,
-            :condition_notes,
-            :appraisal_value,
-            :loan_amount,
-            'pawned',
-            NOW(),
-            :item_photo_path,
-            0,
-            0,
-            1,
-            0
-        )
-    ");
-
-    $stmt->execute([
-        ':tenant_id' => $tenantId,
-        ':pawn_id' => $pawnId,
-        ':ticket_no' => $ticketNo,
-        ':item_name' => $model,
-        ':item_category' => $category,
-        ':serial_no' => $specs,
-        ':condition_notes' => $condition,
-        ':appraisal_value' => $loanAmount,
-        ':loan_amount' => $loanAmount,
-        ':item_photo_path' => $photoPath,
-    ]);
-
-    $stmt = $pdo->prepare("
-        INSERT INTO pawn_updates (
-            ticket_no,
-            update_type,
-            message,
-            created_at,
-            is_read
-        ) VALUES (
-            :ticket_no,
-            'created',
-            'New pawn loan created',
-            NOW(),
-            0
-        )
-    ");
-
-    $stmt->execute([
-        ':ticket_no' => $ticketNo,
-    ]);
-
-    $pdo->commit();
-
-    echo json_encode([
+    respond(201, [
         'success' => true,
-        'message' => 'Pawn loan created successfully',
-        'pawn_id' => $pawnId,
-        'ticket_no' => $ticketNo,
+        'message' => 'Pawn request submitted successfully',
+        'request_id' => (int)$pdo->lastInsertId(),
+        'request_no' => $requestNo,
     ]);
-
 } catch (Throwable $e) {
-    if (isset($pdo) && $pdo->inTransaction()) {
-        $pdo->rollBack();
-    }
-
-    error_log('CREATE PAWN ERROR: ' . $e->getMessage());
-
-    http_response_code(500);
-
-    echo json_encode([
+    respond(500, [
         'success' => false,
-        'message' => $e->getMessage(),
+        'message' => 'Server error',
+        'error' => $e->getMessage(),
     ]);
 }
