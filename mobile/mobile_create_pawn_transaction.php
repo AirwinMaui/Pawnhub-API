@@ -6,6 +6,12 @@ header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Content-Type: application/json; charset=UTF-8');
 
+ini_set('upload_max_filesize', '25M');
+ini_set('post_max_size', '30M');
+ini_set('max_file_uploads', '10');
+ini_set('max_execution_time', '120');
+ini_set('memory_limit', '256M');
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(204);
     exit;
