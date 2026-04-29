@@ -12,9 +12,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
-    exit;
+    respond(405, [
+        'success' => false,
+        'message' => 'Method not allowed',
+    ]);
 }
 
 require_once __DIR__ . '/../db.php';
@@ -68,8 +69,8 @@ function uploadImageToAzure(
     $sasToken = ltrim($sasToken, '?');
 
     $extension = $allowedTypes[$mimeType];
-
     $safeRequestNo = preg_replace('/[^A-Za-z0-9_-]/', '-', $requestNo);
+
     $blobName = "tenants/{$tenantId}/pawn-requests/{$safeRequestNo}/{$imageName}.{$extension}";
     $encodedBlobName = str_replace('%2F', '/', rawurlencode($blobName));
 
@@ -228,9 +229,10 @@ try {
 
     respond(201, [
         'success' => true,
-        'message' => 'Pawn request submitted successfully',
+        'message' => 'Pawn request submitted successfully. Please wait for admin review.',
         'request_id' => (int)$pdo->lastInsertId(),
         'request_no' => $requestNo,
+        'status' => 'pending',
         'photos' => [
             'front' => $frontPhoto,
             'back' => $backPhoto,
