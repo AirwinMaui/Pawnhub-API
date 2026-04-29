@@ -6,14 +6,6 @@ header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
 header('Content-Type: application/json; charset=UTF-8');
 
-error_log('CREATE PAWN REQUEST HIT: method=' . $_SERVER['REQUEST_METHOD'] . ' content_length=' . ($_SERVER['CONTENT_LENGTH'] ?? 'none'));
-
-ini_set('upload_max_filesize', '25M');
-ini_set('post_max_size', '30M');
-ini_set('max_file_uploads', '10');
-ini_set('max_execution_time', '120');
-ini_set('memory_limit', '256M');
-
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(204);
     exit;
@@ -34,37 +26,22 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function uploadImageToAzure(
-    string $fieldName,
+function cleanBase64Image(string $base64): string
+{
+    if (str_contains($base64, ',')) {
+        $parts = explode(',', $base64, 2);
+        return $parts[1];
+    }
+
+    return $base64;
+}
+
+function uploadBase64ToAzure(
+    string $base64,
     int $tenantId,
     string $requestNo,
     string $imageName
-): ?string {
-    if (
-        !isset($_FILES[$fieldName]) ||
-        !is_array($_FILES[$fieldName]) ||
-        ($_FILES[$fieldName]['error'] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE
-    ) {
-        return null;
-    }
-
-    if ($_FILES[$fieldName]['error'] !== UPLOAD_ERR_OK) {
-        throw new Exception("Upload failed for {$fieldName}");
-    }
-
-    $allowedTypes = [
-        'image/jpeg' => 'jpg',
-        'image/png' => 'png',
-        'image/webp' => 'webp',
-    ];
-
-    $tmpPath = $_FILES[$fieldName]['tmp_name'];
-    $mimeType = mime_content_type($tmpPath) ?: ($_FILES[$fieldName]['type'] ?? 'image/jpeg');
-
-    if (!isset($allowedTypes[$mimeType])) {
-        throw new Exception("Invalid image type for {$fieldName}");
-    }
-
+): string {
     $storageAccount = getenv('AZURE_STORAGE_ACCOUNT') ?: 'pawnhubstorage';
     $container = getenv('AZURE_STORAGE_CONTAINER') ?: 'item-images';
     $sasToken = getenv('AZURE_STORAGE_SAS_TOKEN');
@@ -73,22 +50,21 @@ function uploadImageToAzure(
         throw new Exception('Missing AZURE_STORAGE_SAS_TOKEN');
     }
 
+    $base64 = cleanBase64Image($base64);
+    $fileContent = base64_decode($base64, true);
+
+    if ($fileContent === false) {
+        throw new Exception("Invalid base64 image for {$imageName}");
+    }
+
     $sasToken = ltrim($sasToken, '?');
 
-    $extension = $allowedTypes[$mimeType];
-
     $safeRequestNo = preg_replace('/[^A-Za-z0-9_-]/', '-', $requestNo);
-    $blobName = "tenants/{$tenantId}/pawn-requests/{$safeRequestNo}/{$imageName}.{$extension}";
+    $blobName = "tenants/{$tenantId}/pawn-requests/{$safeRequestNo}/{$imageName}.jpg";
     $encodedBlobName = str_replace('%2F', '/', rawurlencode($blobName));
 
     $uploadUrl = "https://{$storageAccount}.blob.core.windows.net/{$container}/{$encodedBlobName}?{$sasToken}";
     $publicUrl = "https://{$storageAccount}.blob.core.windows.net/{$container}/{$encodedBlobName}";
-
-    $fileContent = file_get_contents($tmpPath);
-
-    if ($fileContent === false) {
-        throw new Exception("Unable to read uploaded file for {$fieldName}");
-    }
 
     $ch = curl_init($uploadUrl);
 
@@ -100,7 +76,7 @@ function uploadImageToAzure(
         CURLOPT_TIMEOUT => 60,
         CURLOPT_HTTPHEADER => [
             'x-ms-blob-type: BlockBlob',
-            'Content-Type: ' . $mimeType,
+            'Content-Type: image/jpeg',
             'Content-Length: ' . strlen($fileContent),
         ],
     ]);
@@ -112,22 +88,36 @@ function uploadImageToAzure(
     curl_close($ch);
 
     if ($response === false || $httpCode < 200 || $httpCode >= 300) {
-        error_log("AZURE UPLOAD ERROR {$fieldName}: HTTP {$httpCode} {$curlError}");
-        error_log("AZURE RESPONSE {$fieldName}: " . (string)$response);
-        throw new Exception("Azure upload failed for {$fieldName}. HTTP {$httpCode}");
+        error_log("AZURE BASE64 UPLOAD ERROR {$imageName}: HTTP {$httpCode} {$curlError}");
+        error_log("AZURE BASE64 RESPONSE {$imageName}: " . (string)$response);
+        throw new Exception("Azure upload failed for {$imageName}. HTTP {$httpCode}");
     }
 
     return $publicUrl;
 }
 
 try {
-    $tenantId = (int)($_POST['tenantId'] ?? $_POST['tenant_id'] ?? 0);
-    $customerId = (int)($_POST['customerId'] ?? $_POST['customer_id'] ?? 0);
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
 
-    $category = trim((string)($_POST['category'] ?? ''));
-    $model = trim((string)($_POST['model'] ?? $_POST['description'] ?? ''));
-    $condition = trim((string)($_POST['condition'] ?? ''));
-    $specs = trim((string)($_POST['specs'] ?? $_POST['serial_number'] ?? ''));
+    if (!is_array($data)) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Invalid JSON body',
+        ]);
+    }
+
+    $tenantId = (int)($data['tenantId'] ?? $data['tenant_id'] ?? 0);
+    $customerId = (int)($data['customerId'] ?? $data['customer_id'] ?? 0);
+
+    $category = trim((string)($data['category'] ?? ''));
+    $model = trim((string)($data['model'] ?? $data['description'] ?? ''));
+    $condition = trim((string)($data['condition'] ?? ''));
+    $specs = trim((string)($data['specs'] ?? $data['serial_number'] ?? ''));
+
+    $frontBase64 = (string)($data['frontPhotoBase64'] ?? '');
+    $backBase64 = (string)($data['backPhotoBase64'] ?? '');
+    $detailBase64 = (string)($data['detailPhotoBase64'] ?? '');
 
     if ($tenantId <= 0 || $customerId <= 0) {
         respond(400, [
@@ -143,11 +133,7 @@ try {
         ]);
     }
 
-    if (
-        !isset($_FILES['frontPhoto']) ||
-        !isset($_FILES['backPhoto']) ||
-        !isset($_FILES['detailPhoto'])
-    ) {
+    if ($frontBase64 === '' || $backBase64 === '' || $detailBase64 === '') {
         respond(400, [
             'success' => false,
             'message' => 'Front, back, and detail photos are required',
@@ -179,9 +165,9 @@ try {
 
     $requestNo = 'REQ-' . date('Ymd') . '-' . random_int(1000, 9999);
 
-    $frontPhoto = uploadImageToAzure('frontPhoto', $tenantId, $requestNo, 'front');
-    $backPhoto = uploadImageToAzure('backPhoto', $tenantId, $requestNo, 'back');
-    $detailPhoto = uploadImageToAzure('detailPhoto', $tenantId, $requestNo, 'detail');
+    $frontPhoto = uploadBase64ToAzure($frontBase64, $tenantId, $requestNo, 'front');
+    $backPhoto = uploadBase64ToAzure($backBase64, $tenantId, $requestNo, 'back');
+    $detailPhoto = uploadBase64ToAzure($detailBase64, $tenantId, $requestNo, 'detail');
 
     $stmt = $pdo->prepare("
         INSERT INTO pawn_requests (
