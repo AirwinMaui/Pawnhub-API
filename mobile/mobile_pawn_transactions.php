@@ -74,7 +74,6 @@ try {
     $stmt = $pdo->prepare("
         SELECT
             id,
-            request_no,
             ticket_no,
             customer_name,
             item_category,
@@ -96,7 +95,7 @@ try {
         FROM pawn_transactions
         WHERE tenant_id = :tenant_id
           AND contact_number = :contact_number
-        ORDER BY created_at DESC, id DESC
+        ORDER BY created_at DESC
     ");
 
     $stmt->execute([

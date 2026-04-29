@@ -1,74 +1,51 @@
 <?php
-declare(strict_types=1);
-
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
+header('Access-Control-Allow-Headers: Content-Type');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json; charset=UTF-8');
+header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(204);
-    exit;
-}
-
-require_once __DIR__ . '/../db.php';
-
-function respond(int $statusCode, array $payload): void
-{
-    http_response_code($statusCode);
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    http_response_code(200);
     exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    respond(405, [
-        'success' => false,
-        'message' => 'Method not allowed',
-    ]);
+    http_response_code(405);
+    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
+    exit;
 }
+
+require __DIR__ . '/../db.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
 
-    if (!is_array($data)) {
-        respond(400, [
-            'success' => false,
-            'message' => 'Invalid JSON body',
-        ]);
-    }
-
-    $customerId = (int)($data['customer_id'] ?? $data['customerId'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
-    $ticketNo = trim((string)($data['ticket_no'] ?? $data['ticketNo'] ?? ''));
+    $customerId = (int)($data['customer_id'] ?? 0);
+    $tenantId = (int)($data['tenant_id'] ?? 0);
+    $ticketNo = trim($data['ticket_no'] ?? '');
 
     if ($customerId <= 0 || $tenantId <= 0) {
-        respond(400, [
-            'success' => false,
-            'message' => 'Missing customer_id or tenant_id',
-        ]);
+        http_response_code(400);
+        echo json_encode(['success' => false, 'message' => 'Missing customer_id or tenant_id']);
+        exit;
     }
 
     $custStmt = $pdo->prepare("
-        SELECT id, tenant_id, full_name, contact_number
-        FROM mobile_customers
-        WHERE id = :customer_id
-          AND tenant_id = :tenant_id
-          AND is_active = 1
+        SELECT contact_number
+        FROM customers
+        WHERE id = :customer_id AND tenant_id = :tenant_id
         LIMIT 1
     ");
-
     $custStmt->execute([
         ':customer_id' => $customerId,
         ':tenant_id' => $tenantId,
     ]);
-
     $customer = $custStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
-        respond(404, [
-            'success' => false,
-            'message' => 'Customer not found',
-        ]);
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'Customer not found']);
+        exit;
     }
 
     $sql = "
@@ -81,17 +58,9 @@ try {
             pu.is_read,
             pu.read_at
         FROM pawn_updates pu
-        LEFT JOIN pawn_transactions pt
-            ON pt.ticket_no = pu.ticket_no
-           AND pt.tenant_id = pu.tenant_id
-        LEFT JOIN pawn_requests pr
-            ON pr.request_no = pu.ticket_no
-           AND pr.tenant_id = pu.tenant_id
-        WHERE pu.tenant_id = :tenant_id
-          AND (
-                pt.contact_number = :contact_number
-             OR pr.contact_number = :contact_number
-          )
+        JOIN pawn_transactions p ON pu.ticket_no = p.ticket_no
+        WHERE p.tenant_id = :tenant_id
+          AND p.contact_number = :contact_number
     ";
 
     $params = [
@@ -109,14 +78,16 @@ try {
     $stmt = $pdo->prepare($sql);
     $stmt->execute($params);
 
-    respond(200, [
+    $updates = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    echo json_encode([
         'success' => true,
-        'updates' => $stmt->fetchAll(PDO::FETCH_ASSOC),
+        'updates' => $updates,
     ]);
+    exit;
+
 } catch (Throwable $e) {
-    respond(500, [
-        'success' => false,
-        'message' => 'Server error',
-        'error' => $e->getMessage(),
-    ]);
+    http_response_code(500);
+    echo json_encode(['success' => false, 'message' => 'Server error', 'error' => $e->getMessage()]);
+    exit;
 }
