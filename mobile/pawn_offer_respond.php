@@ -3,8 +3,8 @@ declare(strict_types=1);
 
 header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
+header('Access-Control-Allow-Headers: Authorization, Content-Type');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(204);
@@ -20,32 +20,17 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
-function generateTicketNo(PDO $pdo, int $tenantId): string
+function getBearerToken(): string
 {
-    $prefix = 'PN-' . date('Ymd') . '-';
+    $authHeader = $_SERVER['HTTP_AUTHORIZATION']
+        ?? $_SERVER['REDIRECT_HTTP_AUTHORIZATION']
+        ?? '';
 
-    for ($i = 0; $i < 10; $i++) {
-        $ticketNo = $prefix . random_int(1000, 9999);
-
-        $stmt = $pdo->prepare("
-            SELECT id
-            FROM pawn_transactions
-            WHERE tenant_id = :tenant_id
-              AND ticket_no = :ticket_no
-            LIMIT 1
-        ");
-
-        $stmt->execute([
-            ':tenant_id' => $tenantId,
-            ':ticket_no' => $ticketNo,
-        ]);
-
-        if (!$stmt->fetch(PDO::FETCH_ASSOC)) {
-            return $ticketNo;
-        }
+    if (preg_match('/Bearer\s+(.+)/i', $authHeader, $matches)) {
+        return trim($matches[1]);
     }
 
-    return $prefix . time();
+    return '';
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -56,97 +41,111 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 try {
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
+    $token = getBearerToken();
 
-    if (!is_array($data)) {
+    if ($token === '') {
+        respond(401, [
+            'success' => false,
+            'message' => 'Unauthorized. Token required.',
+        ]);
+    }
+
+    $authStmt = $pdo->prepare("
+        SELECT
+            mct.token,
+            mct.customer_id,
+            mct.expires_at,
+            mc.id AS mobile_customer_id,
+            mc.tenant_id,
+            mc.full_name,
+            mc.contact_number,
+            mc.username
+        FROM mobile_customer_tokens mct
+        JOIN mobile_customers mc ON mc.id = mct.customer_id
+        WHERE mct.token = :token
+          AND mc.is_active = 1
+          AND (mct.expires_at IS NULL OR mct.expires_at > NOW())
+        LIMIT 1
+    ");
+
+    $authStmt->execute([
+        ':token' => $token,
+    ]);
+
+    $auth = $authStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$auth) {
+        respond(401, [
+            'success' => false,
+            'message' => 'Invalid or expired token.',
+        ]);
+    }
+
+    $customerId = (int)$auth['mobile_customer_id'];
+    $tenantId = (int)$auth['tenant_id'];
+
+    $body = json_decode(file_get_contents('php://input'), true);
+
+    if (!is_array($body)) {
         respond(400, [
             'success' => false,
             'message' => 'Invalid JSON body',
         ]);
     }
 
-    $customerId = (int)($data['customer_id'] ?? $data['customerId'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
-    $requestNo = trim((string)($data['request_no'] ?? $data['requestNo'] ?? ''));
-    $action = strtolower(trim((string)($data['action'] ?? '')));
+    $requestNo = trim((string)($body['request_no'] ?? $body['requestNo'] ?? ''));
+    $action = strtolower(trim((string)($body['action'] ?? '')));
 
-    if ($customerId <= 0 || $tenantId <= 0 || $requestNo === '') {
-        respond(400, [
+    if ($requestNo === '' || !in_array($action, ['accept', 'decline'], true)) {
+        respond(422, [
             'success' => false,
-            'message' => 'Missing customer_id, tenant_id, or request_no',
+            'message' => 'request_no and action accept|decline are required.',
         ]);
-    }
-
-    if (!in_array($action, ['accept', 'decline', 'reject'], true)) {
-        respond(400, [
-            'success' => false,
-            'message' => 'Invalid action',
-        ]);
-    }
-
-    if ($action === 'reject') {
-        $action = 'decline';
     }
 
     $pdo->beginTransaction();
 
-    $customerStmt = $pdo->prepare("
-        SELECT id, tenant_id, full_name, contact_number
-        FROM mobile_customers
-        WHERE id = :customer_id
-          AND tenant_id = :tenant_id
-          AND is_active = 1
-        LIMIT 1
-    ");
-
-    $customerStmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
-    ]);
-
-    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$customer) {
-        $pdo->rollBack();
-        respond(404, [
-            'success' => false,
-            'message' => 'Customer not found',
-        ]);
-    }
-
-    $requestStmt = $pdo->prepare("
+    $reqStmt = $pdo->prepare("
         SELECT *
         FROM pawn_requests
-        WHERE tenant_id = :tenant_id
+        WHERE request_no = :request_no
+          AND tenant_id = :tenant_id
           AND customer_id = :customer_id
-          AND request_no = :request_no
         LIMIT 1
         FOR UPDATE
     ");
 
-    $requestStmt->execute([
+    $reqStmt->execute([
+        ':request_no' => $requestNo,
         ':tenant_id' => $tenantId,
         ':customer_id' => $customerId,
-        ':request_no' => $requestNo,
     ]);
 
-    $request = $requestStmt->fetch(PDO::FETCH_ASSOC);
+    $pr = $reqStmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$request) {
+    if (!$pr) {
         $pdo->rollBack();
         respond(404, [
             'success' => false,
-            'message' => 'Pawn request not found',
+            'message' => 'Pawn request not found.',
         ]);
     }
 
-    if ($request['status'] !== 'approved') {
+    if ($pr['status'] !== 'approved') {
         $pdo->rollBack();
-        respond(400, [
+
+        $friendly = match ($pr['status']) {
+            'pending' => 'No offer has been sent yet. Please wait for staff to review your request.',
+            'customer_accepted' => 'You already accepted this offer.',
+            'rejected' => 'This request has been rejected or declined.',
+            'cancelled' => 'This request has already been cancelled.',
+            default => 'This request cannot be responded to at this time.',
+        };
+
+        respond(409, [
             'success' => false,
-            'message' => 'This request is not yet approved for customer response',
-            'status' => $request['status'],
+            'message' => $friendly,
+            'status' => $pr['status'],
         ]);
     }
 
@@ -156,86 +155,106 @@ try {
             SET status = 'rejected',
                 updated_at = NOW()
             WHERE id = :id
-              AND tenant_id = :tenant_id
         ");
 
         $updateStmt->execute([
-            ':id' => $request['id'],
-            ':tenant_id' => $tenantId,
+            ':id' => $pr['id'],
         ]);
+
+        try {
+            $updateLogStmt = $pdo->prepare("
+                INSERT INTO pawn_updates (
+                    tenant_id,
+                    ticket_no,
+                    update_type,
+                    message,
+                    created_at
+                ) VALUES (
+                    :tenant_id,
+                    :ticket_no,
+                    'CUSTOMER_DECLINED',
+                    :message,
+                    NOW()
+                )
+            ");
+
+            $updateLogStmt->execute([
+                ':tenant_id' => $tenantId,
+                ':ticket_no' => $pr['request_no'],
+                ':message' => "Customer {$auth['full_name']} declined the loan offer for request {$pr['request_no']}.",
+            ]);
+        } catch (Throwable $e) {
+            error_log('PAWN UPDATE LOG ERROR: ' . $e->getMessage());
+        }
 
         $pdo->commit();
 
         respond(200, [
             'success' => true,
-            'message' => 'Offer rejected successfully',
+            'message' => 'You have declined the loan offer. Your request has been closed.',
+            'data' => [
+                'request_no' => $pr['request_no'],
+                'status' => 'rejected',
+            ],
         ]);
     }
 
-    $existingStmt = $pdo->prepare("
-        SELECT id, ticket_no
+    $offerAmount = (float)($pr['offer_amount'] ?? 0);
+    $interestRate = (float)($pr['interest_rate'] ?? 0);
+    $appraisalValue = (float)($pr['appraisal_value'] ?? 0);
+
+    if ($offerAmount <= 0) {
+        $pdo->rollBack();
+        respond(409, [
+            'success' => false,
+            'message' => 'This offer has no valid loan amount.',
+        ]);
+    }
+
+    $interestAmount = $offerAmount * $interestRate;
+    $totalRedeem = $offerAmount + $interestAmount;
+
+    $pawnDate = date('Y-m-d');
+
+    $claimTerm = trim((string)($pr['claim_term'] ?? ''));
+
+    if ($claimTerm !== '' && preg_match('/(\d+)/', $claimTerm, $matches)) {
+        $termDays = max(1, (int)$matches[1]);
+    } else {
+        $termDays = 30;
+    }
+
+    $maturityDate = date('Y-m-d', strtotime("+{$termDays} days"));
+    $expiryDate = date('Y-m-d', strtotime("+60 days"));
+
+    $ticketNo = 'PT-' . date('Ymd') . '-' . random_int(1000, 9999);
+
+    $existingTicketStmt = $pdo->prepare("
+        SELECT id
         FROM pawn_transactions
         WHERE tenant_id = :tenant_id
           AND request_no = :request_no
         LIMIT 1
     ");
 
-    $existingStmt->execute([
+    $existingTicketStmt->execute([
         ':tenant_id' => $tenantId,
-        ':request_no' => $requestNo,
+        ':request_no' => $pr['request_no'],
     ]);
 
-    $existingTransaction = $existingStmt->fetch(PDO::FETCH_ASSOC);
-
-    if ($existingTransaction) {
-        $pdo->commit();
-
-        respond(200, [
-            'success' => true,
-            'message' => 'Offer already accepted',
-            'ticket_no' => $existingTransaction['ticket_no'],
-        ]);
-    }
-
-    $offerAmount = (float)($request['offer_amount'] ?? 0);
-    $appraisalValue = (float)($request['appraisal_value'] ?? 0);
-    $interestRate = (float)($request['interest_rate'] ?? 0);
-
-    if ($offerAmount <= 0) {
+    if ($existingTicketStmt->fetch(PDO::FETCH_ASSOC)) {
         $pdo->rollBack();
-        respond(400, [
+        respond(409, [
             'success' => false,
-            'message' => 'Invalid offer amount',
+            'message' => 'This request was already converted to an active loan.',
         ]);
     }
 
-    $interestAmount = round($offerAmount * ($interestRate / 100), 2);
-    $totalRedeem = $offerAmount + $interestAmount;
-
-    $pawnDate = date('Y-m-d');
-    $maturityDate = date('Y-m-d', strtotime('+30 days'));
-    $expiryDate = date('Y-m-d', strtotime('+90 days'));
-
-    if (!empty($request['claim_term'])) {
-        $claimTerm = strtolower((string)$request['claim_term']);
-
-        if (str_contains($claimTerm, '60')) {
-            $maturityDate = date('Y-m-d', strtotime('+60 days'));
-            $expiryDate = date('Y-m-d', strtotime('+120 days'));
-        } elseif (str_contains($claimTerm, '90')) {
-            $maturityDate = date('Y-m-d', strtotime('+90 days'));
-            $expiryDate = date('Y-m-d', strtotime('+150 days'));
-        }
-    }
-
-    $ticketNo = generateTicketNo($pdo, $tenantId);
-
-    $insertStmt = $pdo->prepare("
+    $insertTxnStmt = $pdo->prepare("
         INSERT INTO pawn_transactions (
             tenant_id,
             request_no,
             ticket_no,
-            customer_id,
             customer_name,
             contact_number,
             item_category,
@@ -259,7 +278,6 @@ try {
             :tenant_id,
             :request_no,
             :ticket_no,
-            :customer_id,
             :customer_name,
             :contact_number,
             :item_category,
@@ -282,17 +300,16 @@ try {
         )
     ");
 
-    $insertStmt->execute([
+    $insertTxnStmt->execute([
         ':tenant_id' => $tenantId,
-        ':request_no' => $requestNo,
+        ':request_no' => $pr['request_no'],
         ':ticket_no' => $ticketNo,
-        ':customer_id' => $customerId,
-        ':customer_name' => $request['customer_name'] ?: $customer['full_name'],
-        ':contact_number' => $request['contact_number'] ?: $customer['contact_number'],
-        ':item_category' => $request['item_category'],
-        ':item_description' => $request['item_description'],
-        ':item_condition' => $request['item_condition'],
-        ':serial_number' => $request['serial_number'],
+        ':customer_name' => $pr['customer_name'],
+        ':contact_number' => $pr['contact_number'],
+        ':item_category' => $pr['item_category'],
+        ':item_description' => $pr['item_description'],
+        ':item_condition' => $pr['item_condition'],
+        ':serial_number' => $pr['serial_number'],
         ':appraisal_value' => $appraisalValue,
         ':loan_amount' => $offerAmount,
         ':interest_rate' => $interestRate,
@@ -301,33 +318,75 @@ try {
         ':pawn_date' => $pawnDate,
         ':maturity_date' => $maturityDate,
         ':expiry_date' => $expiryDate,
-        ':item_photo_path' => $request['front_photo_path'] ?? null,
+        ':item_photo_path' => $pr['front_photo_path'],
     ]);
 
-    $updateRequestStmt = $pdo->prepare("
+    $transactionId = (int)$pdo->lastInsertId();
+
+    $updateReqStmt = $pdo->prepare("
         UPDATE pawn_requests
         SET status = 'customer_accepted',
+            ticket_no = :ticket_no,
             updated_at = NOW()
         WHERE id = :id
-          AND tenant_id = :tenant_id
     ");
 
-    $updateRequestStmt->execute([
-        ':id' => $request['id'],
-        ':tenant_id' => $tenantId,
+    $updateReqStmt->execute([
+        ':ticket_no' => $ticketNo,
+        ':id' => $pr['id'],
     ]);
+
+    try {
+        $updateLogStmt = $pdo->prepare("
+            INSERT INTO pawn_updates (
+                tenant_id,
+                ticket_no,
+                update_type,
+                message,
+                created_at
+            ) VALUES (
+                :tenant_id,
+                :ticket_no,
+                'CUSTOMER_ACCEPTED',
+                :message,
+                NOW()
+            )
+        ");
+
+        $updateLogStmt->execute([
+            ':tenant_id' => $tenantId,
+            ':ticket_no' => $ticketNo,
+            ':message' => "Customer {$auth['full_name']} accepted the loan offer of ₱" . number_format($offerAmount, 2) . ". Loan is now active.",
+        ]);
+    } catch (Throwable $e) {
+        error_log('PAWN UPDATE LOG ERROR: ' . $e->getMessage());
+    }
 
     $pdo->commit();
 
     respond(200, [
         'success' => true,
-        'message' => 'Offer accepted successfully',
-        'ticket_no' => $ticketNo,
+        'message' => 'You have accepted the loan offer. Your loan is now active.',
+        'data' => [
+            'transaction_id' => $transactionId,
+            'request_no' => $pr['request_no'],
+            'ticket_no' => $ticketNo,
+            'status' => 'active',
+            'offer_amount' => $offerAmount,
+            'interest_rate' => $interestRate,
+            'interest_amount' => round($interestAmount, 2),
+            'total_redeem' => round($totalRedeem, 2),
+            'pawn_date' => $pawnDate,
+            'maturity_date' => $maturityDate,
+            'expiry_date' => $expiryDate,
+        ],
     ]);
 } catch (Throwable $e) {
-    if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
+
+    error_log('PAWN OFFER RESPOND ERROR: ' . $e->getMessage());
 
     respond(500, [
         'success' => false,
