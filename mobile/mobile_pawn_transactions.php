@@ -71,9 +71,14 @@ try {
         ]);
     }
 
-    $stmt = $pdo->prepare("
+    /*
+     * Accepted loans only.
+     * These are already real pawn transactions.
+     */
+    $transactionStmt = $pdo->prepare("
         SELECT
             id,
+            request_no,
             ticket_no,
             customer_name,
             item_category,
@@ -98,14 +103,51 @@ try {
         ORDER BY created_at DESC
     ");
 
-    $stmt->execute([
+    $transactionStmt->execute([
         ':tenant_id' => $tenantId,
         ':contact_number' => $customer['contact_number'],
     ]);
 
+    /*
+     * Pawn requests that still need customer action.
+     * pending = waiting for staff appraisal
+     * approved = customer can accept/reject offer
+     */
+    $requestStmt = $pdo->prepare("
+        SELECT
+            id,
+            request_no,
+            customer_id,
+            customer_name,
+            contact_number,
+            item_category,
+            item_description,
+            item_condition,
+            serial_number,
+            appraisal_value,
+            offer_amount,
+            interest_rate,
+            claim_term,
+            status,
+            remarks,
+            created_at,
+            updated_at
+        FROM pawn_requests
+        WHERE tenant_id = :tenant_id
+          AND customer_id = :customer_id
+          AND status IN ('pending', 'approved')
+        ORDER BY updated_at DESC, created_at DESC
+    ");
+
+    $requestStmt->execute([
+        ':tenant_id' => $tenantId,
+        ':customer_id' => $customerId,
+    ]);
+
     respond(200, [
         'success' => true,
-        'transactions' => $stmt->fetchAll(PDO::FETCH_ASSOC),
+        'transactions' => $transactionStmt->fetchAll(PDO::FETCH_ASSOC),
+        'requests' => $requestStmt->fetchAll(PDO::FETCH_ASSOC),
     ]);
 } catch (Throwable $e) {
     respond(500, [
