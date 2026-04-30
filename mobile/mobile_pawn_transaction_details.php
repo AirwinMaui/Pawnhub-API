@@ -1,83 +1,162 @@
 <?php
+declare(strict_types=1);
+
+ob_start();
+
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
+
+header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
+    http_response_code(204);
+    exit;
+}
+
+require_once __DIR__ . '/../db.php';
+
+function respond(int $statusCode, array $payload): void
+{
+    if (ob_get_length()) {
+        ob_clean();
+    }
+
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
-    exit;
+    respond(405, [
+        'success' => false,
+        'message' => 'Method not allowed',
+    ]);
 }
 
-require __DIR__ . '/../db.php';
-
 try {
-    $data = json_decode(file_get_contents('php://input'), true);
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
 
-    $customerId = (int)($data['customer_id'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? 0);
-    $ticketNo = trim($data['ticket_no'] ?? '');
-
-    if ($customerId <= 0 || $tenantId <= 0 || $ticketNo === '') {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'message' => 'Missing required fields']);
-        exit;
+    if (!is_array($data)) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Invalid JSON body',
+        ]);
     }
 
-    $custStmt = $pdo->prepare("
-        SELECT contact_number
-        FROM customers
-        WHERE id = :customer_id AND tenant_id = :tenant_id
+    $customerId = (int)($data['customer_id'] ?? $data['customerId'] ?? 0);
+    $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
+    $ticketNo = trim((string)($data['ticket_no'] ?? $data['ticketNo'] ?? ''));
+
+    if ($customerId <= 0 || $tenantId <= 0 || $ticketNo === '') {
+        respond(400, [
+            'success' => false,
+            'message' => 'Missing customer_id, tenant_id, or ticket_no',
+            'received' => $data,
+        ]);
+    }
+
+    $customerStmt = $pdo->prepare("
+        SELECT id, tenant_id, full_name, contact_number
+        FROM mobile_customers
+        WHERE id = :customer_id
+          AND tenant_id = :tenant_id
+          AND is_active = 1
         LIMIT 1
     ");
-    $custStmt->execute([
+
+    $customerStmt->execute([
         ':customer_id' => $customerId,
         ':tenant_id' => $tenantId,
     ]);
-    $customer = $custStmt->fetch(PDO::FETCH_ASSOC);
+
+    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'message' => 'Customer not found']);
-        exit;
+        respond(404, [
+            'success' => false,
+            'message' => 'Customer not found',
+            'debug' => [
+                'customer_id' => $customerId,
+                'tenant_id' => $tenantId,
+            ],
+        ]);
     }
 
-    $stmt = $pdo->prepare("
-        SELECT *
+    $transactionStmt = $pdo->prepare("
+        SELECT
+            id,
+            tenant_id,
+            request_no,
+            ticket_no,
+            customer_id,
+            customer_name,
+            contact_number,
+            email,
+            address,
+            item_category,
+            item_description,
+            item_condition,
+            item_weight,
+            item_karat,
+            serial_number,
+            appraisal_value,
+            loan_amount,
+            interest_rate,
+            claim_term,
+            interest_amount,
+            total_redeem,
+            pawn_date,
+            maturity_date,
+            expiry_date,
+            auction_eligible,
+            auction_status,
+            status,
+            item_photo_path,
+            created_at,
+            updated_at
         FROM pawn_transactions
         WHERE tenant_id = :tenant_id
-          AND contact_number = :contact_number
           AND ticket_no = :ticket_no
+          AND (
+                customer_id = :customer_id
+                OR contact_number = :contact_number
+              )
         LIMIT 1
     ");
-    $stmt->execute([
+
+    $transactionStmt->execute([
         ':tenant_id' => $tenantId,
-        ':contact_number' => $customer['contact_number'],
         ':ticket_no' => $ticketNo,
+        ':customer_id' => $customerId,
+        ':contact_number' => $customer['contact_number'],
     ]);
 
-    $transaction = $stmt->fetch(PDO::FETCH_ASSOC);
+    $transaction = $transactionStmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$transaction) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'message' => 'Transaction not found']);
-        exit;
+        respond(404, [
+            'success' => false,
+            'message' => 'Loan not found for this customer',
+            'debug' => [
+                'ticket_no' => $ticketNo,
+                'customer_id' => $customerId,
+                'contact_number' => $customer['contact_number'],
+            ],
+        ]);
     }
 
-    echo json_encode([
+    respond(200, [
         'success' => true,
         'transaction' => $transaction,
     ]);
-    exit;
-
 } catch (Throwable $e) {
-    http_response_code(500);
-    echo json_encode(['success' => false, 'message' => 'Server error', 'error' => $e->getMessage()]);
-    exit;
+    respond(500, [
+        'success' => false,
+        'message' => 'Server error',
+        'error' => $e->getMessage(),
+    ]);
 }

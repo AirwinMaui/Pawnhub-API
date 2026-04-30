@@ -1,207 +1,241 @@
 <?php
+declare(strict_types=1);
+
+ob_start();
+
+ini_set('display_errors', '0');
+error_reporting(E_ALL);
+
+header('Content-Type: application/json; charset=UTF-8');
 header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type');
+header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json');
 
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
+    http_response_code(204);
+    exit;
+}
+
+require_once __DIR__ . '/../db.php';
+
+function respond(int $statusCode, array $payload): void
+{
+    if (ob_get_length()) {
+        ob_clean();
+    }
+
+    http_response_code($statusCode);
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
     exit;
 }
 
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    http_response_code(405);
-    echo json_encode(['success' => false, 'message' => 'Method not allowed']);
-    exit;
+    respond(405, [
+        'success' => false,
+        'message' => 'Method not allowed',
+    ]);
 }
 
-require __DIR__ . '/../db.php';
-
 try {
-    $data = json_decode(file_get_contents('php://input'), true);
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
 
-    $customerId = (int)($data['customer_id'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? 0);
-    $ticketNo = trim($data['ticket_no'] ?? '');
-    $paymentAmount = (float)($data['payment_amount'] ?? 0);
-    $paymentMethod = trim($data['payment_method'] ?? 'cash');
-    $notes = trim($data['notes'] ?? '');
+    if (!is_array($data)) {
+        respond(400, [
+            'success' => false,
+            'message' => 'Invalid JSON body',
+        ]);
+    }
+
+    $customerId = (int)($data['customer_id'] ?? $data['customerId'] ?? 0);
+    $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
+    $ticketNo = trim((string)($data['ticket_no'] ?? $data['ticketNo'] ?? ''));
+    $paymentAmount = (float)($data['payment_amount'] ?? $data['paymentAmount'] ?? 0);
+    $paymentMethod = trim((string)($data['payment_method'] ?? $data['paymentMethod'] ?? 'cash'));
+    $notes = trim((string)($data['notes'] ?? ''));
 
     if ($customerId <= 0 || $tenantId <= 0 || $ticketNo === '') {
-        http_response_code(400);
-        echo json_encode(['success' => false, 'message' => 'Missing required fields']);
-        exit;
-    }
-
-    $custStmt = $pdo->prepare("
-        SELECT id, full_name, contact_number
-        FROM customers
-        WHERE id = :customer_id AND tenant_id = :tenant_id
-        LIMIT 1
-    ");
-    $custStmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
-    ]);
-    $customer = $custStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$customer) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'message' => 'Customer not found']);
-        exit;
-    }
-
-    $pawnStmt = $pdo->prepare("
-        SELECT id, ticket_no, status, loan_amount, interest_amount, total_redeem
-        FROM pawn_transactions
-        WHERE tenant_id = :tenant_id
-          AND contact_number = :contact_number
-          AND ticket_no = :ticket_no
-        LIMIT 1
-    ");
-    $pawnStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':contact_number' => $customer['contact_number'],
-        ':ticket_no' => $ticketNo,
-    ]);
-    $pawn = $pawnStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$pawn) {
-        http_response_code(404);
-        echo json_encode(['success' => false, 'message' => 'Pawn transaction not found']);
-        exit;
-    }
-
-    $currentStatus = strtolower((string)($pawn['status'] ?? ''));
-    if (in_array($currentStatus, ['paid', 'redeemed', 'closed', 'completed'], true)) {
-        http_response_code(409);
-        echo json_encode(['success' => false, 'message' => 'Loan already paid']);
-        exit;
-    }
-
-    $amountDue = (float)($pawn['total_redeem'] ?? 0);
-    if ($amountDue <= 0) {
-        $amountDue = (float)($pawn['loan_amount'] ?? 0) + (float)($pawn['interest_amount'] ?? 0);
-    }
-
-    if ($paymentAmount <= 0) {
-        $paymentAmount = $amountDue;
-    }
-
-    if ($paymentAmount < $amountDue) {
-        http_response_code(400);
-        echo json_encode([
+        respond(400, [
             'success' => false,
-            'message' => 'Insufficient payment amount',
-            'amount_due' => $amountDue,
+            'message' => 'Missing customer_id, tenant_id, or ticket_no',
+            'received' => $data,
         ]);
-        exit;
     }
-
-    $changeAmount = $paymentAmount - $amountDue;
-    $orNo = 'OR-' . date('YmdHis') . '-' . mt_rand(100, 999);
 
     $pdo->beginTransaction();
 
-    $insertPaymentStmt = $pdo->prepare("
-        INSERT INTO payment_transactions (
-            tenant_id,
-            ticket_no,
-            action,
-            or_no,
-            amount_due,
-            cash_received,
-            change_amount,
-            staff_username,
-            staff_role,
-            new_ticket_no,
-            created_at
-        ) VALUES (
-            :tenant_id,
-            :ticket_no,
-            :action,
-            :or_no,
-            :amount_due,
-            :cash_received,
-            :change_amount,
-            :staff_username,
-            :staff_role,
-            :new_ticket_no,
-            NOW()
-        )
-    ");
-    $insertPaymentStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':ticket_no' => $ticketNo,
-        ':action' => 'redeem',
-        ':or_no' => $orNo,
-        ':amount_due' => $amountDue,
-        ':cash_received' => $paymentAmount,
-        ':change_amount' => $changeAmount,
-        ':staff_username' => 'mobile-app',
-        ':staff_role' => $paymentMethod !== '' ? $paymentMethod : 'mobile',
-        ':new_ticket_no' => null,
-    ]);
-
-    $updatePawnStmt = $pdo->prepare("
-        UPDATE pawn_transactions
-        SET status = 'Paid'
-        WHERE id = :id AND tenant_id = :tenant_id
+    $customerStmt = $pdo->prepare("
+        SELECT id, tenant_id, full_name, contact_number
+        FROM mobile_customers
+        WHERE id = :customer_id
+          AND tenant_id = :tenant_id
+          AND is_active = 1
         LIMIT 1
     ");
-    $updatePawnStmt->execute([
-        ':id' => $pawn['id'],
+
+    $customerStmt->execute([
+        ':customer_id' => $customerId,
         ':tenant_id' => $tenantId,
     ]);
 
-    $insertUpdateStmt = $pdo->prepare("
-        INSERT INTO pawn_updates (
-            ticket_no,
-            update_type,
-            message,
-            created_at,
-            is_read,
-            read_at
-        ) VALUES (
-            :ticket_no,
-            :update_type,
-            :message,
-            NOW(),
-            0,
-            NULL
-        )
+    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$customer) {
+        $pdo->rollBack();
+
+        respond(404, [
+            'success' => false,
+            'message' => 'Customer not found',
+            'debug' => [
+                'customer_id' => $customerId,
+                'tenant_id' => $tenantId,
+            ],
+        ]);
+    }
+
+    $transactionStmt = $pdo->prepare("
+        SELECT *
+        FROM pawn_transactions
+        WHERE tenant_id = :tenant_id
+          AND ticket_no = :ticket_no
+          AND (
+                customer_id = :customer_id
+                OR contact_number = :contact_number
+              )
+        LIMIT 1
+        FOR UPDATE
     ");
-    $insertUpdateStmt->execute([
+
+    $transactionStmt->execute([
+        ':tenant_id' => $tenantId,
         ':ticket_no' => $ticketNo,
-        ':update_type' => 'payment',
-        ':message' => $notes !== ''
-            ? 'Loan paid via mobile app. Notes: ' . $notes
-            : 'Loan paid via mobile app.',
+        ':customer_id' => $customerId,
+        ':contact_number' => $customer['contact_number'],
     ]);
+
+    $transaction = $transactionStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$transaction) {
+        $pdo->rollBack();
+
+        respond(404, [
+            'success' => false,
+            'message' => 'Loan not found for this customer',
+            'debug' => [
+                'ticket_no' => $ticketNo,
+                'customer_id' => $customerId,
+                'contact_number' => $customer['contact_number'],
+            ],
+        ]);
+    }
+
+    $currentStatus = strtolower((string)($transaction['status'] ?? ''));
+
+    if (in_array($currentStatus, ['paid', 'redeemed', 'closed', 'completed'], true)) {
+        $pdo->commit();
+
+        respond(200, [
+            'success' => true,
+            'message' => 'Loan is already paid',
+            'ticket_no' => $ticketNo,
+        ]);
+    }
+
+    $totalRedeem = (float)($transaction['total_redeem'] ?? 0);
+
+    if ($paymentAmount <= 0) {
+        $paymentAmount = $totalRedeem;
+    }
+
+    if ($totalRedeem > 0 && $paymentAmount < $totalRedeem) {
+        $pdo->rollBack();
+
+        respond(400, [
+            'success' => false,
+            'message' => 'Payment amount is less than total redeem amount',
+            'required_amount' => $totalRedeem,
+            'payment_amount' => $paymentAmount,
+        ]);
+    }
+
+    $updateStmt = $pdo->prepare("
+        UPDATE pawn_transactions
+        SET status = 'paid',
+            updated_at = NOW()
+        WHERE id = :id
+          AND tenant_id = :tenant_id
+    ");
+
+    $updateStmt->execute([
+        ':id' => $transaction['id'],
+        ':tenant_id' => $tenantId,
+    ]);
+
+    /*
+     * Optional payment history insert.
+     * This will only run if you have a pawn_payments table.
+     */
+    try {
+        $paymentStmt = $pdo->prepare("
+            INSERT INTO pawn_payments (
+                tenant_id,
+                pawn_transaction_id,
+                ticket_no,
+                customer_id,
+                customer_name,
+                contact_number,
+                payment_amount,
+                payment_method,
+                notes,
+                created_at
+            ) VALUES (
+                :tenant_id,
+                :pawn_transaction_id,
+                :ticket_no,
+                :customer_id,
+                :customer_name,
+                :contact_number,
+                :payment_amount,
+                :payment_method,
+                :notes,
+                NOW()
+            )
+        ");
+
+        $paymentStmt->execute([
+            ':tenant_id' => $tenantId,
+            ':pawn_transaction_id' => $transaction['id'],
+            ':ticket_no' => $ticketNo,
+            ':customer_id' => $customerId,
+            ':customer_name' => $customer['full_name'],
+            ':contact_number' => $customer['contact_number'],
+            ':payment_amount' => $paymentAmount,
+            ':payment_method' => $paymentMethod,
+            ':notes' => $notes,
+        ]);
+    } catch (Throwable $ignored) {
+        /*
+         * Ignore if pawn_payments table does not exist.
+         * The loan status update is still valid.
+         */
+    }
 
     $pdo->commit();
 
-    echo json_encode([
+    respond(200, [
         'success' => true,
-        'message' => 'Loan payment processed successfully',
+        'message' => 'Loan paid successfully',
         'ticket_no' => $ticketNo,
-        'or_no' => $orNo,
-        'amount_due' => $amountDue,
-        'cash_received' => $paymentAmount,
-        'change_amount' => $changeAmount,
+        'payment_amount' => $paymentAmount,
     ]);
-    exit;
-
 } catch (Throwable $e) {
-    if (isset($pdo) && $pdo->inTransaction()) {
+    if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
-    http_response_code(500);
-    echo json_encode([
+    respond(500, [
         'success' => false,
         'message' => 'Server error',
-        'error' => $e->getMessage()
+        'error' => $e->getMessage(),
     ]);
-    exit;
 }
