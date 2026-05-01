@@ -94,6 +94,200 @@ try {
     $attributes = $checkoutSession['attributes'] ?? [];
     $metadata = $attributes['metadata'] ?? [];
 
+    $paymentType = strtolower((string)($metadata['payment_type'] ?? ''));
+
+    /*
+     * SHOP PAYMENT HANDLER
+     * Handles payments created by mobile/paymongo_shop_checkout.php.
+     */
+    if ($paymentType === 'shop') {
+        $tenantId = intval($metadata['tenant_id'] ?? 0);
+        $customerId = intval($metadata['customer_id'] ?? 0);
+        $orderId = intval($metadata['order_id'] ?? 0);
+        $inventoryItemId = intval($metadata['inventory_item_id'] ?? 0);
+        $paymentAmount = floatval($metadata['payment_amount'] ?? 0);
+        $quantity = intval($metadata['quantity'] ?? 1);
+
+        if ($quantity <= 0) {
+            $quantity = 1;
+        }
+
+        if (
+            $tenantId <= 0 ||
+            $customerId <= 0 ||
+            $orderId <= 0 ||
+            $inventoryItemId <= 0 ||
+            $sessionId === ''
+        ) {
+            respond(400, [
+                'success' => false,
+                'message' => 'Missing shop payment metadata.',
+                'metadata' => $metadata,
+                'session_id' => $sessionId,
+            ]);
+        }
+
+        $pdo->beginTransaction();
+
+        $orderStmt = $pdo->prepare("
+            SELECT *
+            FROM shop_orders
+            WHERE id = :id
+              AND tenant_id = :tenant_id
+              AND customer_id = :customer_id
+            LIMIT 1
+            FOR UPDATE
+        ");
+
+        $orderStmt->execute([
+            ':id' => $orderId,
+            ':tenant_id' => $tenantId,
+            ':customer_id' => $customerId,
+        ]);
+
+        $order = $orderStmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$order) {
+            $pdo->rollBack();
+
+            respond(404, [
+                'success' => false,
+                'message' => 'Shop order not found.',
+                'order_id' => $orderId,
+                'customer_id' => $customerId,
+                'tenant_id' => $tenantId,
+            ]);
+        }
+
+        $orderTotal = floatval($order['total_amount'] ?? 0);
+
+        if ($paymentAmount <= 0) {
+            $paymentAmount = $orderTotal;
+        }
+
+        if ($orderTotal > 0 && $paymentAmount < $orderTotal) {
+            $pdo->rollBack();
+
+            respond(400, [
+                'success' => false,
+                'message' => 'PayMongo amount is less than shop order total.',
+                'required_amount' => $orderTotal,
+                'payment_amount' => $paymentAmount,
+                'order_id' => $orderId,
+            ]);
+        }
+
+        if (strtolower((string)($order['payment_status'] ?? '')) !== 'paid') {
+            $updateOrderStmt = $pdo->prepare("
+                UPDATE shop_orders
+                SET payment_status = 'paid',
+                    payment_method = 'paymongo',
+                    payment_provider = 'paymongo',
+                    payment_reference_number = :payment_reference_number,
+                    paid_at = NOW(),
+                    status = 'paid',
+                    order_status = 'paid',
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND tenant_id = :tenant_id
+            ");
+
+            $updateOrderStmt->execute([
+                ':payment_reference_number' => $sessionId,
+                ':id' => $orderId,
+                ':tenant_id' => $tenantId,
+            ]);
+
+            $updateItemStmt = $pdo->prepare("
+                UPDATE item_inventory
+                SET stock_qty = GREATEST(stock_qty - :quantity_stock, 0),
+                    status = CASE
+                        WHEN GREATEST(stock_qty - :quantity_status, 0) <= 0 THEN 'sold'
+                        ELSE status
+                    END,
+                    is_shop_visible = CASE
+                        WHEN GREATEST(stock_qty - :quantity_visible, 0) <= 0 THEN 0
+                        ELSE is_shop_visible
+                    END,
+                    sold_amount = :sold_amount,
+                    sold_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = :id
+                  AND tenant_id = :tenant_id
+            ");
+
+            $updateItemStmt->execute([
+                ':quantity_stock' => $quantity,
+                ':quantity_status' => $quantity,
+                ':quantity_visible' => $quantity,
+                ':sold_amount' => $paymentAmount,
+                ':id' => $inventoryItemId,
+                ':tenant_id' => $tenantId,
+            ]);
+
+            $updateOrderItemStmt = $pdo->prepare("
+                UPDATE shop_order_items
+                SET item_status = 'paid'
+                WHERE order_id = :order_id
+                  AND tenant_id = :tenant_id
+                  AND inventory_item_id = :inventory_item_id
+            ");
+
+            $updateOrderItemStmt->execute([
+                ':order_id' => $orderId,
+                ':tenant_id' => $tenantId,
+                ':inventory_item_id' => $inventoryItemId,
+            ]);
+        }
+
+        try {
+            $logStmt = $pdo->prepare("
+                INSERT INTO payment_logs (
+                    tenant_id,
+                    customer_id,
+                    ticket_no,
+                    session_id,
+                    amount,
+                    status,
+                    created_at
+                ) VALUES (
+                    :tenant_id,
+                    :customer_id,
+                    :ticket_no,
+                    :session_id,
+                    :amount,
+                    'paid',
+                    NOW()
+                )
+            ");
+
+            $logStmt->execute([
+                ':tenant_id' => $tenantId,
+                ':customer_id' => $customerId,
+                ':ticket_no' => 'SHOP-ORDER-' . $orderId,
+                ':session_id' => $sessionId,
+                ':amount' => $paymentAmount,
+            ]);
+        } catch (Throwable $ignored) {
+            // Ignore if payment_logs does not exist or has a different schema.
+        }
+
+        $pdo->commit();
+
+        respond(200, [
+            'success' => true,
+            'message' => 'Shop order marked as paid.',
+            'order_id' => $orderId,
+            'inventory_item_id' => $inventoryItemId,
+            'session_id' => $sessionId,
+            'payment_amount' => $paymentAmount,
+        ]);
+    }
+
+    /*
+     * LOAN PAYMENT HANDLER
+     * Handles payments created by mobile/paymongo_mobile_checkout.php.
+     */
     $tenantId = (int)($metadata['tenant_id'] ?? 0);
     $customerId = (int)($metadata['customer_id'] ?? 0);
     $ticketNo = trim((string)($metadata['ticket_no'] ?? ''));
@@ -102,7 +296,7 @@ try {
     if ($tenantId <= 0 || $customerId <= 0 || $ticketNo === '' || $sessionId === '') {
         respond(400, [
             'success' => false,
-            'message' => 'Missing required PayMongo metadata.',
+            'message' => 'Missing required PayMongo loan metadata.',
             'metadata' => $metadata,
             'session_id' => $sessionId,
         ]);
@@ -287,7 +481,7 @@ try {
             ':amount' => $paymentAmount,
         ]);
     } catch (Throwable $ignored) {
-        // Ignore if payment_logs table does not exist or has a different schema.
+        // Ignore if payment_logs does not exist or has a different schema.
     }
 
     $pdo->commit();
