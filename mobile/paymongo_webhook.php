@@ -3,8 +3,8 @@
 
 header('Content-Type: application/json');
 
-require 'db.php';
-require 'paymongo_config.php';
+require_once dirname(__DIR__) . '/db.php';
+require_once __DIR__ . '/paymongo_config.php';
 
 $rawBody = file_get_contents('php://input');
 $sigHeader = $_SERVER['HTTP_PAYMONGO_SIGNATURE'] ?? '';

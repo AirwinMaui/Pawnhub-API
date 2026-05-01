@@ -3,8 +3,8 @@
 
 header('Content-Type: application/json');
 
-require 'db.php';
-require 'paymongo_config.php';
+require_once dirname(__DIR__) . '/db.php';
+require_once __DIR__ . '/paymongo_config.php';
 
 $rawInput = file_get_contents('php://input');
 $input = json_decode($rawInput, true);
