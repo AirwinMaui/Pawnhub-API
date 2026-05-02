@@ -10,6 +10,14 @@ if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
     exit;
 }
 
+if ($_SERVER["REQUEST_METHOD"] === "GET") {
+    echo json_encode([
+        "success" => true,
+        "message" => "Notifications API is reachable"
+    ]);
+    exit;
+}
+
 /*
   Your db.php should create a PDO connection like this:
 
