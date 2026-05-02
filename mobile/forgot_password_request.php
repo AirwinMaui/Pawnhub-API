@@ -30,7 +30,7 @@ try {
     }
 
     $stmt = $pdo->prepare("
-        SELECT c.id, c.tenant_id, c.fullname, c.email, t.business_name
+        SELECT c.id, c.tenant_id, c.username, c.email, t.business_name
         FROM customers c
         LEFT JOIN tenants t ON c.tenant_id = t.id
         WHERE c.username = :username
@@ -87,7 +87,9 @@ try {
     ]);
 
     $business = $customer['business_name'] ?? 'PawnHub';
-    $safeName = htmlspecialchars($customer['fullname'] ?? 'Customer', ENT_QUOTES, 'UTF-8');
+    $customerName = $customer['username'] ?? 'Customer';
+
+    $safeName = htmlspecialchars($customerName, ENT_QUOTES, 'UTF-8');
     $safeBusiness = htmlspecialchars($business, ENT_QUOTES, 'UTF-8');
     $safeCode = htmlspecialchars($resetCode, ENT_QUOTES, 'UTF-8');
 
@@ -128,7 +130,7 @@ try {
 
     $sent = sendMail(
         $customer['email'],
-        $customer['fullname'] ?? 'Customer',
+        $customerName,
         'PawnHub — Password Reset Code',
         $html
     );
