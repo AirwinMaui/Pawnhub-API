@@ -33,13 +33,14 @@ try {
         SELECT 
             c.id,
             c.tenant_id,
-            c.fullname,
+            c.full_name,
             c.username,
             c.email,
             t.business_name
         FROM mobile_customers c
         LEFT JOIN tenants t ON c.tenant_id = t.id
         WHERE LOWER(TRIM(c.username)) = LOWER(TRIM(:username))
+          AND c.is_active = 1
         LIMIT 1
     ");
 
@@ -99,8 +100,8 @@ try {
     ]);
 
     $business = $customer['business_name'] ?? 'PawnHub';
-    $customerName = !empty($customer['fullname'])
-        ? $customer['fullname']
+    $customerName = !empty($customer['full_name'])
+        ? $customer['full_name']
         : ($customer['username'] ?? 'Customer');
 
     $safeName = htmlspecialchars($customerName, ENT_QUOTES, 'UTF-8');

@@ -47,6 +47,7 @@ try {
         SELECT id, tenant_id
         FROM mobile_customers
         WHERE LOWER(TRIM(username)) = LOWER(TRIM(:username))
+          AND is_active = 1
         LIMIT 1
     ");
 
@@ -92,13 +93,14 @@ try {
 
     $updateStmt = $pdo->prepare("
         UPDATE mobile_customers
-        SET password_hash = :password_hash
+        SET password = :password,
+            updated_at = NOW()
         WHERE id = :customer_id
           AND tenant_id = :tenant_id
     ");
 
     $updateStmt->execute([
-        ':password_hash' => $newHash,
+        ':password' => $newHash,
         ':customer_id' => $customer['id'],
         ':tenant_id' => $customer['tenant_id'],
     ]);
