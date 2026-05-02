@@ -1,36 +1,127 @@
 <?php
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type');
-header('Access-Control-Allow-Methods: POST, OPTIONS');
-header('Content-Type: application/json');
+declare(strict_types=1);
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+header("Access-Control-Allow-Origin: *");
+header("Access-Control-Allow-Headers: Content-Type");
+header("Access-Control-Allow-Methods: POST, OPTIONS");
+header("Content-Type: application/json");
+
+if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
     http_response_code(200);
     exit;
 }
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+if ($_SERVER["REQUEST_METHOD"] !== "POST") {
     http_response_code(405);
     echo json_encode([
-        'success' => false,
-        'message' => 'Method not allowed'
+        "success" => false,
+        "message" => "Method not allowed",
     ]);
     exit;
 }
 
-require __DIR__ . '/../db.php';
+require __DIR__ . "/../db.php";
+
+function envValue(string $key): string
+{
+    $value = getenv($key);
+    return $value === false ? "" : trim($value);
+}
+
+function normalizeSasToken(string $sasToken): string
+{
+    if ($sasToken === "") {
+        return "";
+    }
+
+    return substr($sasToken, 0, 1) === "?" ? substr($sasToken, 1) : $sasToken;
+}
+
+function buildProfilePhotoUrl(?string $profilePhoto): ?string
+{
+    if (!$profilePhoto) {
+        return null;
+    }
+
+    $profilePhoto = trim($profilePhoto);
+
+    if ($profilePhoto === "") {
+        return null;
+    }
+
+    /*
+      If the DB already stores a full URL, return it.
+      This works for:
+      https://account.blob.core.windows.net/container/file.jpg
+      https://account.blob.core.windows.net/container/file.jpg?SAS_TOKEN
+    */
+    if (
+        stripos($profilePhoto, "http://") === 0 ||
+        stripos($profilePhoto, "https://") === 0
+    ) {
+        return $profilePhoto;
+    }
+
+    /*
+      If the DB stores only the blob path, build the full URL using:
+      AZURE_BLOB_BASE_URL
+      AZURE_BLOB_CONTAINER
+      AZURE_STORAGE_SAS_TOKEN
+    */
+    $baseUrl = rtrim(envValue("AZURE_BLOB_BASE_URL"), "/");
+    $container = trim(envValue("AZURE_BLOB_CONTAINER"), "/");
+    $sasToken = normalizeSasToken(envValue("AZURE_STORAGE_SAS_TOKEN"));
+
+    if ($baseUrl === "" || $container === "") {
+        return $profilePhoto;
+    }
+
+    $blobPath = ltrim($profilePhoto, "/");
+
+    /*
+      Prevent duplicate container name if profile_photo already starts with it.
+      Example:
+      profile_photo = customer-images/tenant-1/customer-1/photo.jpg
+    */
+    if (strpos($blobPath, $container . "/") === 0) {
+        $blobPath = substr($blobPath, strlen($container) + 1);
+    }
+
+    $encodedBlobPath = implode(
+        "/",
+        array_map("rawurlencode", explode("/", $blobPath))
+    );
+
+    $url = "{$baseUrl}/{$container}/{$encodedBlobPath}";
+
+    if ($sasToken !== "") {
+        $url .= "?{$sasToken}";
+    }
+
+    return $url;
+}
 
 try {
-    $data = json_decode(file_get_contents('php://input'), true);
+    $rawInput = file_get_contents("php://input");
+    $data = json_decode($rawInput, true);
 
-    $customerId = (int)($data['customer_id'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? 0);
+    if (!is_array($data)) {
+        http_response_code(400);
+        echo json_encode([
+            "success" => false,
+            "message" => "Invalid JSON body",
+        ]);
+        exit;
+    }
+
+    $customerId = (int)($data["customer_id"] ?? $data["customerId"] ?? 0);
+    $tenantId = (int)($data["tenant_id"] ?? $data["tenantId"] ?? 0);
 
     if ($customerId <= 0 || $tenantId <= 0) {
         http_response_code(400);
         echo json_encode([
-            'success' => false,
-            'message' => 'Missing customer_id or tenant_id'
+            "success" => false,
+            "message" => "Missing customer_id or tenant_id",
         ]);
         exit;
     }
@@ -69,8 +160,8 @@ try {
     ");
 
     $stmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
+        ":customer_id" => $customerId,
+        ":tenant_id" => $tenantId,
     ]);
 
     $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -78,52 +169,62 @@ try {
     if (!$row) {
         http_response_code(404);
         echo json_encode([
-            'success' => false,
-            'message' => 'Customer not found'
+            "success" => false,
+            "message" => "Customer not found",
         ]);
         exit;
     }
 
+    $profileImageUrl = buildProfilePhotoUrl($row["profile_photo"] ?? null);
+
     echo json_encode([
-        'success' => true,
-        'customer' => [
-            'id' => (int)$row['id'],
-            'full_name' => $row['full_name'],
-            'username' => $row['username'],
-            'contact_number' => $row['contact_number'],
-            'email' => $row['email'],
-            'birthdate' => $row['birthdate'],
-            'address' => $row['address'],
-            'gender' => $row['gender'],
-            'nationality' => $row['nationality'],
-            'birthplace' => null,
-            'registered_at' => $row['created_at'],
-            'profile_photo' => $row['profile_photo'],
+        "success" => true,
+        "customer" => [
+            "id" => (int)$row["id"],
+            "full_name" => $row["full_name"],
+            "username" => $row["username"],
+            "contact_number" => $row["contact_number"],
+            "email" => $row["email"],
+            "birthdate" => $row["birthdate"],
+            "address" => $row["address"],
+            "gender" => $row["gender"],
+            "nationality" => $row["nationality"],
+            "birthplace" => null,
+            "registered_at" => $row["created_at"],
+
+            /*
+              Keep old name for compatibility.
+            */
+            "profile_photo" => $profileImageUrl,
+
+            /*
+              New name for the React Native Profile and Dashboard screens.
+            */
+            "profile_image_url" => $profileImageUrl,
         ],
-        'tenant' => [
-            'id' => (int)$row['tenant_id'],
-            'tenant_code' => $row['tenant_code'],
-            'name' => $row['business_name'],
-            'slug' => $row['slug'],
+        "tenant" => [
+            "id" => (int)$row["tenant_id"],
+            "tenant_code" => $row["tenant_code"],
+            "name" => $row["business_name"],
+            "slug" => $row["slug"],
         ],
-        'theme' => [
-            'primary_color' => $row['primary_color'],
-            'secondary_color' => $row['secondary_color'],
-            'accent_color' => $row['accent_color'],
-            'logo_text' => $row['logo_text'],
-            'logo_url' => $row['logo_url'],
-            'system_name' => $row['system_name'],
-            'bg_image_url' => $row['bg_image_url'],
+        "theme" => [
+            "primary_color" => $row["primary_color"],
+            "secondary_color" => $row["secondary_color"],
+            "accent_color" => $row["accent_color"],
+            "logo_text" => $row["logo_text"],
+            "logo_url" => $row["logo_url"],
+            "system_name" => $row["system_name"],
+            "bg_image_url" => $row["bg_image_url"],
         ],
     ]);
     exit;
-
 } catch (Throwable $e) {
     http_response_code(500);
     echo json_encode([
-        'success' => false,
-        'message' => 'Server error',
-        'error' => $e->getMessage()
+        "success" => false,
+        "message" => "Server error",
+        "error" => $e->getMessage(),
     ]);
     exit;
 }

@@ -19,6 +19,110 @@ function jsonResponse(array $payload, int $statusCode = 200): void
     exit;
 }
 
+function getEnvValue(string $key): string
+{
+    $value = getenv($key);
+
+    if ($value === false || trim($value) === "") {
+        throw new RuntimeException("Missing environment variable: {$key}");
+    }
+
+    return trim($value);
+}
+
+function getImageExtension(string $mimeType): string
+{
+    $allowed = [
+        "image/jpeg" => "jpg",
+        "image/png" => "png",
+        "image/webp" => "webp",
+    ];
+
+    if (!isset($allowed[$mimeType])) {
+        throw new RuntimeException("Only JPG, PNG, and WEBP images are allowed.");
+    }
+
+    return $allowed[$mimeType];
+}
+
+function normalizeSasToken(string $sasToken): string
+{
+    return str_starts_with($sasToken, "?") ? substr($sasToken, 1) : $sasToken;
+}
+
+function buildBlobUrl(string $baseUrl, string $container, string $blobName): string
+{
+    $baseUrl = rtrim($baseUrl, "/");
+    $container = trim($container, "/");
+
+    $encodedBlobName = implode(
+        "/",
+        array_map("rawurlencode", explode("/", $blobName))
+    );
+
+    return "{$baseUrl}/{$container}/{$encodedBlobName}";
+}
+
+function uploadToAzureBlobWithSas(
+    string $tmpPath,
+    string $mimeType,
+    string $blobName
+): string {
+    $baseUrl = getEnvValue("AZURE_BLOB_BASE_URL");
+    $container = getEnvValue("AZURE_BLOB_CONTAINER");
+    $sasToken = normalizeSasToken(getEnvValue("AZURE_STORAGE_SAS_TOKEN"));
+
+    $blobUrl = buildBlobUrl($baseUrl, $container, $blobName);
+    $uploadUrl = "{$blobUrl}?{$sasToken}";
+
+    $fileContents = file_get_contents($tmpPath);
+
+    if ($fileContents === false) {
+        throw new RuntimeException("Unable to read uploaded image.");
+    }
+
+    $headers = [
+        "x-ms-blob-type: BlockBlob",
+        "Content-Type: {$mimeType}",
+        "Content-Length: " . strlen($fileContents),
+    ];
+
+    $ch = curl_init($uploadUrl);
+
+    curl_setopt_array($ch, [
+        CURLOPT_CUSTOMREQUEST => "PUT",
+        CURLOPT_HTTPHEADER => $headers,
+        CURLOPT_POSTFIELDS => $fileContents,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HEADER => true,
+        CURLOPT_TIMEOUT => 60,
+    ]);
+
+    $response = curl_exec($ch);
+
+    if ($response === false) {
+        $error = curl_error($ch);
+        curl_close($ch);
+
+        throw new RuntimeException("Azure Blob upload failed: {$error}");
+    }
+
+    $statusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($statusCode < 200 || $statusCode >= 300) {
+        throw new RuntimeException(
+            "Azure Blob upload failed with status {$statusCode}: {$response}"
+        );
+    }
+
+    /*
+      If your container is public, save only $blobUrl.
+      If your container is private, the mobile app needs a SAS URL to display it.
+    */
+    return "{$blobUrl}?{$sasToken}";
+}
+
 try {
     if ($_SERVER["REQUEST_METHOD"] !== "POST") {
         jsonResponse([
@@ -53,41 +157,35 @@ try {
         ], 400);
     }
 
-    $allowedMimeTypes = [
-        "image/jpeg" => "jpg",
-        "image/png" => "png",
-        "image/webp" => "webp",
-    ];
+    $maxBytes = 5 * 1024 * 1024;
 
-    $mimeType = mime_content_type($file["tmp_name"]);
-
-    if (!isset($allowedMimeTypes[$mimeType])) {
+    if ((int) $file["size"] > $maxBytes) {
         jsonResponse([
             "success" => false,
-            "message" => "Only JPG, PNG, and WEBP images are allowed.",
+            "message" => "Image is too large. Maximum size is 5MB.",
         ], 400);
     }
 
-    $extension = $allowedMimeTypes[$mimeType];
-    $uploadDir = __DIR__ . "/profile_uploads";
+    $finfo = new finfo(FILEINFO_MIME_TYPE);
+    $mimeType = $finfo->file($file["tmp_name"]);
 
-    if (!is_dir($uploadDir)) {
-        mkdir($uploadDir, 0755, true);
-    }
-
-    $fileName = "customer_{$customerId}_tenant_{$tenantId}_" . time() . "." . $extension;
-    $targetPath = $uploadDir . "/" . $fileName;
-
-    if (!move_uploaded_file($file["tmp_name"], $targetPath)) {
+    if (!$mimeType) {
         jsonResponse([
             "success" => false,
-            "message" => "Unable to save uploaded image.",
-        ], 500);
+            "message" => "Unable to detect image type.",
+        ], 400);
     }
 
-    $scheme = (!empty($_SERVER["HTTPS"]) && $_SERVER["HTTPS"] !== "off") ? "https" : "http";
-    $host = $_SERVER["HTTP_HOST"];
-    $imageUrl = "{$scheme}://{$host}/mobile/profile_uploads/{$fileName}";
+    $extension = getImageExtension($mimeType);
+
+    $fileName = "profile_" . bin2hex(random_bytes(12)) . "." . $extension;
+    $blobName = "tenant-{$tenantId}/customer-{$customerId}/{$fileName}";
+
+    $profileImageUrl = uploadToAzureBlobWithSas(
+        $file["tmp_name"],
+        $mimeType,
+        $blobName
+    );
 
     $stmt = $pdo->prepare("
         UPDATE mobile_customers
@@ -97,15 +195,22 @@ try {
     ");
 
     $stmt->execute([
-        ":profile_image_url" => $imageUrl,
+        ":profile_image_url" => $profileImageUrl,
         ":customer_id" => $customerId,
         ":tenant_id" => $tenantId,
     ]);
 
+    if ($stmt->rowCount() === 0) {
+        jsonResponse([
+            "success" => false,
+            "message" => "Customer not found or profile image was not updated.",
+        ], 404);
+    }
+
     jsonResponse([
         "success" => true,
         "message" => "Profile image uploaded.",
-        "profile_image_url" => $imageUrl,
+        "profile_image_url" => $profileImageUrl,
     ]);
 } catch (Throwable $error) {
     jsonResponse([
