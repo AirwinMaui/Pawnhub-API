@@ -30,10 +30,16 @@ try {
     }
 
     $stmt = $pdo->prepare("
-        SELECT c.id, c.tenant_id, c.username, c.email, t.business_name
-        FROM customers c
+        SELECT 
+            c.id,
+            c.tenant_id,
+            c.fullname,
+            c.username,
+            c.email,
+            t.business_name
+        FROM mobile_customers c
         LEFT JOIN tenants t ON c.tenant_id = t.id
-        WHERE c.username = :username
+        WHERE LOWER(TRIM(c.username)) = LOWER(TRIM(:username))
         LIMIT 1
     ");
 
@@ -44,10 +50,10 @@ try {
     $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if ($customer) {
-    error_log('Forgot password customer found. ID: ' . $customer['id'] . ' Email: ' . ($customer['email'] ?? 'NO EMAIL'));
-} else {
-    error_log('Forgot password customer not found for username: ' . $username);
-}
+        error_log('Forgot password customer found. ID: ' . $customer['id'] . ' Email: ' . ($customer['email'] ?? 'NO EMAIL'));
+    } else {
+        error_log('Forgot password customer not found for username: ' . $username);
+    }
 
     if (!$customer) {
         echo json_encode([
@@ -93,7 +99,9 @@ try {
     ]);
 
     $business = $customer['business_name'] ?? 'PawnHub';
-    $customerName = $customer['username'] ?? 'Customer';
+    $customerName = !empty($customer['fullname'])
+        ? $customer['fullname']
+        : ($customer['username'] ?? 'Customer');
 
     $safeName = htmlspecialchars($customerName, ENT_QUOTES, 'UTF-8');
     $safeBusiness = htmlspecialchars($business, ENT_QUOTES, 'UTF-8');
@@ -134,7 +142,6 @@ try {
 </body>
 </html>';
 
-    
     error_log('Attempting to send reset email to: ' . $customer['email']);
 
     $sent = sendMail(
@@ -143,6 +150,7 @@ try {
         'PawnHub — Password Reset Code',
         $html
     );
+
     error_log('Reset email send result: ' . ($sent ? 'success' : 'failed'));
 
     if (!$sent) {

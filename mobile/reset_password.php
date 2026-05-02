@@ -45,8 +45,8 @@ try {
 
     $stmt = $pdo->prepare("
         SELECT id, tenant_id
-        FROM customers
-        WHERE username = :username
+        FROM mobile_customers
+        WHERE LOWER(TRIM(username)) = LOWER(TRIM(:username))
         LIMIT 1
     ");
 
@@ -91,7 +91,7 @@ try {
     $newHash = password_hash($newPassword, PASSWORD_BCRYPT);
 
     $updateStmt = $pdo->prepare("
-        UPDATE customers
+        UPDATE mobile_customers
         SET password_hash = :password_hash
         WHERE id = :customer_id
           AND tenant_id = :tenant_id
