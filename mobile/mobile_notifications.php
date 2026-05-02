@@ -243,37 +243,55 @@ if ($status === "accepted") {
         $maturityDateRaw = $loan["maturity_date"];
 
         if ($maturityDateRaw && in_array($status, ["active", "ongoing"], true)) {
-            $maturityDate = new DateTimeImmutable($maturityDateRaw);
-            $daysUntilDue = (int) $today->diff($maturityDate)->format("%r%a");
+    $maturityDate = new DateTimeImmutable($maturityDateRaw);
+    $daysUntilDue = (int) $today->diff($maturityDate)->format("%r%a");
+    $formattedDueDate = $maturityDate->format("M d, Y");
 
-            if ($daysUntilDue < 0) {
-                addNotification(
-                    $pdo,
-                    $tenantId,
-                    $customerId,
-                    "loan_overdue",
-                    "Loan is overdue",
-                    "Ticket #{$ticketNo} for {$category} is overdue. Please settle or renew it.",
-                    "loan",
-                    $loanId,
-                    "my-loans",
-                    ["transactionId" => $loanId]
-                );
-            } elseif ($daysUntilDue <= 7) {
-                addNotification(
-                    $pdo,
-                    $tenantId,
-                    $customerId,
-                    "loan_due_soon",
-                    "Loan due soon",
-                    "Ticket #{$ticketNo} for {$category} is due on " . $maturityDate->format("M d, Y") . ".",
-                    "loan",
-                    $loanId,
-                    "my-loans",
-                    ["transactionId" => $loanId]
-                );
-            }
-        }
+    if ($daysUntilDue > 0 && $daysUntilDue <= 7) {
+        addNotification(
+            $pdo,
+            $tenantId,
+            $customerId,
+            "payment_due_soon",
+            "Payment due soon",
+            "Payment for ticket #{$ticketNo} for {$category} is due on {$formattedDueDate}. Please pay or renew before the deadline.",
+            "loan",
+            $loanId,
+            "my-loans",
+            ["transactionId" => $loanId]
+        );
+    }
+
+    if ($daysUntilDue === 0) {
+        addNotification(
+            $pdo,
+            $tenantId,
+            $customerId,
+            "payment_due_today",
+            "Payment due today",
+            "Payment for ticket #{$ticketNo} for {$category} is due today. Please pay or renew now.",
+            "loan",
+            $loanId,
+            "my-loans",
+            ["transactionId" => $loanId]
+        );
+    }
+
+    if ($daysUntilDue < 0) {
+        addNotification(
+            $pdo,
+            $tenantId,
+            $customerId,
+            "payment_overdue",
+            "Payment overdue",
+            "Payment for ticket #{$ticketNo} for {$category} is overdue. Please settle or renew it as soon as possible.",
+            "loan",
+            $loanId,
+            "my-loans",
+            ["transactionId" => $loanId]
+        );
+    }
+}
 
         if ($status === "redeemed") {
             addNotification(
