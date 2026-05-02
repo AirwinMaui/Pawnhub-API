@@ -31,7 +31,7 @@ if ($_SERVER["REQUEST_METHOD"] === "GET") {
       ]
   );
 */
-require_once __DIR__ . "/db.php";
+require_once __DIR__ . "/../db.php";
 
 function jsonResponse(array $payload, int $statusCode = 200): void
 {
