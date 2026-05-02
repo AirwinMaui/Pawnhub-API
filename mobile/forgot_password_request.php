@@ -43,6 +43,12 @@ try {
 
     $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
+    if ($customer) {
+    error_log('Forgot password customer found. ID: ' . $customer['id'] . ' Email: ' . ($customer['email'] ?? 'NO EMAIL'));
+} else {
+    error_log('Forgot password customer not found for username: ' . $username);
+}
+
     if (!$customer) {
         echo json_encode([
             'success' => true,
@@ -128,12 +134,16 @@ try {
 </body>
 </html>';
 
+    
+    error_log('Attempting to send reset email to: ' . $customer['email']);
+
     $sent = sendMail(
         $customer['email'],
         $customerName,
         'PawnHub — Password Reset Code',
         $html
     );
+    error_log('Reset email send result: ' . ($sent ? 'success' : 'failed'));
 
     if (!$sent) {
         http_response_code(500);
