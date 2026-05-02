@@ -16,6 +16,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 }
 
 require __DIR__ . '/../db.php';
+require __DIR__ . '/../mailer.php';
 
 try {
     $data = json_decode(file_get_contents('php://input'), true);
