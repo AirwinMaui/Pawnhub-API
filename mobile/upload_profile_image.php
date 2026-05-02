@@ -1,16 +1,26 @@
 <?php
 declare(strict_types=1);
 
-header("Content-Type: application/json");
 header("Access-Control-Allow-Origin: *");
 header("Access-Control-Allow-Headers: Content-Type");
 header("Access-Control-Allow-Methods: POST, OPTIONS");
+header("Content-Type: application/json");
 
 if ($_SERVER["REQUEST_METHOD"] === "OPTIONS") {
+    http_response_code(200);
     exit;
 }
 
-require_once __DIR__ . "/../db.php";
+if ($_SERVER["REQUEST_METHOD"] !== "POST") {
+    http_response_code(405);
+    echo json_encode([
+        "success" => false,
+        "message" => "Method not allowed",
+    ]);
+    exit;
+}
+
+require __DIR__ . "/../db.php";
 
 function jsonResponse(array $payload, int $statusCode = 200): void
 {
@@ -19,7 +29,7 @@ function jsonResponse(array $payload, int $statusCode = 200): void
     exit;
 }
 
-function getEnvValue(string $key): string
+function envValue(string $key): string
 {
     $value = getenv($key);
 
@@ -28,6 +38,30 @@ function getEnvValue(string $key): string
     }
 
     return trim($value);
+}
+
+function normalizeSasToken(string $sasToken): string
+{
+    $sasToken = trim($sasToken);
+
+    if ($sasToken === "") {
+        return "";
+    }
+
+    return substr($sasToken, 0, 1) === "?" ? substr($sasToken, 1) : $sasToken;
+}
+
+function appendSasToken(string $url, string $sasToken): string
+{
+    $sasToken = normalizeSasToken($sasToken);
+
+    if ($sasToken === "") {
+        return $url;
+    }
+
+    $cleanUrl = strtok($url, "?");
+
+    return $cleanUrl . "?" . $sasToken;
 }
 
 function getImageExtension(string $mimeType): string
@@ -45,12 +79,7 @@ function getImageExtension(string $mimeType): string
     return $allowed[$mimeType];
 }
 
-function normalizeSasToken(string $sasToken): string
-{
-    return str_starts_with($sasToken, "?") ? substr($sasToken, 1) : $sasToken;
-}
-
-function buildBlobUrl(string $baseUrl, string $container, string $blobName): string
+function buildCleanBlobUrl(string $baseUrl, string $container, string $blobName): string
 {
     $baseUrl = rtrim($baseUrl, "/");
     $container = trim($container, "/");
@@ -67,13 +96,13 @@ function uploadToAzureBlobWithSas(
     string $tmpPath,
     string $mimeType,
     string $blobName
-): string {
-    $baseUrl = getEnvValue("AZURE_BLOB_BASE_URL");
-    $container = getEnvValue("AZURE_BLOB_CONTAINER");
-    $sasToken = normalizeSasToken(getEnvValue("AZURE_STORAGE_SAS_TOKEN"));
+): array {
+    $baseUrl = envValue("AZURE_BLOB_BASE_URL");
+    $container = envValue("AZURE_BLOB_CONTAINER");
+    $sasToken = normalizeSasToken(envValue("AZURE_STORAGE_SAS_TOKEN"));
 
-    $blobUrl = buildBlobUrl($baseUrl, $container, $blobName);
-    $uploadUrl = "{$blobUrl}?{$sasToken}";
+    $cleanBlobUrl = buildCleanBlobUrl($baseUrl, $container, $blobName);
+    $uploadUrl = appendSasToken($cleanBlobUrl, $sasToken);
 
     $fileContents = file_get_contents($tmpPath);
 
@@ -116,35 +145,27 @@ function uploadToAzureBlobWithSas(
         );
     }
 
-    /*
-      If your container is public, save only $blobUrl.
-      If your container is private, the mobile app needs a SAS URL to display it.
-    */
-    return "{$blobUrl}?{$sasToken}";
+    return [
+        "clean_url" => $cleanBlobUrl,
+        "display_url" => appendSasToken($cleanBlobUrl, $sasToken),
+    ];
 }
 
 try {
-    if ($_SERVER["REQUEST_METHOD"] !== "POST") {
-        jsonResponse([
-            "success" => false,
-            "message" => "POST method required.",
-        ], 405);
-    }
-
-    $customerId = (int) ($_POST["customer_id"] ?? $_POST["customerId"] ?? 0);
-    $tenantId = (int) ($_POST["tenant_id"] ?? $_POST["tenantId"] ?? 0);
+    $customerId = (int)($_POST["customer_id"] ?? $_POST["customerId"] ?? 0);
+    $tenantId = (int)($_POST["tenant_id"] ?? $_POST["tenantId"] ?? 0);
 
     if ($customerId <= 0 || $tenantId <= 0) {
         jsonResponse([
             "success" => false,
-            "message" => "Missing customerId or tenantId.",
+            "message" => "Missing customer_id or tenant_id",
         ], 400);
     }
 
     if (!isset($_FILES["profile_image"])) {
         jsonResponse([
             "success" => false,
-            "message" => "No image uploaded.",
+            "message" => "No image uploaded",
         ], 400);
     }
 
@@ -153,13 +174,13 @@ try {
     if ($file["error"] !== UPLOAD_ERR_OK) {
         jsonResponse([
             "success" => false,
-            "message" => "Upload failed.",
+            "message" => "Upload failed",
         ], 400);
     }
 
     $maxBytes = 5 * 1024 * 1024;
 
-    if ((int) $file["size"] > $maxBytes) {
+    if ((int)$file["size"] > $maxBytes) {
         jsonResponse([
             "success" => false,
             "message" => "Image is too large. Maximum size is 5MB.",
@@ -172,7 +193,7 @@ try {
     if (!$mimeType) {
         jsonResponse([
             "success" => false,
-            "message" => "Unable to detect image type.",
+            "message" => "Unable to detect image type",
         ], 400);
     }
 
@@ -181,21 +202,26 @@ try {
     $fileName = "profile_" . bin2hex(random_bytes(12)) . "." . $extension;
     $blobName = "tenant-{$tenantId}/customer-{$customerId}/{$fileName}";
 
-    $profileImageUrl = uploadToAzureBlobWithSas(
+    $blobResult = uploadToAzureBlobWithSas(
         $file["tmp_name"],
         $mimeType,
         $blobName
     );
 
+    /*
+      Store the clean Blob URL without SAS in the database.
+      mobile_profile.php will append the current SAS token when returning it.
+    */
     $stmt = $pdo->prepare("
         UPDATE mobile_customers
-        SET profile_image_url = :profile_image_url
+        SET profile_photo = :profile_photo
         WHERE id = :customer_id
           AND tenant_id = :tenant_id
+          AND is_active = 1
     ");
 
     $stmt->execute([
-        ":profile_image_url" => $profileImageUrl,
+        ":profile_photo" => $blobResult["clean_url"],
         ":customer_id" => $customerId,
         ":tenant_id" => $tenantId,
     ]);
@@ -203,18 +229,20 @@ try {
     if ($stmt->rowCount() === 0) {
         jsonResponse([
             "success" => false,
-            "message" => "Customer not found or profile image was not updated.",
+            "message" => "Customer not found or profile photo was not updated.",
         ], 404);
     }
 
     jsonResponse([
         "success" => true,
         "message" => "Profile image uploaded.",
-        "profile_image_url" => $profileImageUrl,
+        "profile_photo" => $blobResult["display_url"],
+        "profile_image_url" => $blobResult["display_url"],
     ]);
-} catch (Throwable $error) {
+} catch (Throwable $e) {
     jsonResponse([
         "success" => false,
-        "message" => $error->getMessage(),
+        "message" => "Server error",
+        "error" => $e->getMessage(),
     ], 500);
 }

@@ -30,11 +30,26 @@ function envValue(string $key): string
 
 function normalizeSasToken(string $sasToken): string
 {
+    $sasToken = trim($sasToken);
+
     if ($sasToken === "") {
         return "";
     }
 
     return substr($sasToken, 0, 1) === "?" ? substr($sasToken, 1) : $sasToken;
+}
+
+function appendSasToken(string $url): string
+{
+    $sasToken = normalizeSasToken(envValue("AZURE_STORAGE_SAS_TOKEN"));
+
+    if ($sasToken === "") {
+        return $url;
+    }
+
+    $cleanUrl = strtok($url, "?");
+
+    return $cleanUrl . "?" . $sasToken;
 }
 
 function buildProfilePhotoUrl(?string $profilePhoto): ?string
@@ -49,28 +64,15 @@ function buildProfilePhotoUrl(?string $profilePhoto): ?string
         return null;
     }
 
-    /*
-      If the DB already stores a full URL, return it.
-      This works for:
-      https://account.blob.core.windows.net/container/file.jpg
-      https://account.blob.core.windows.net/container/file.jpg?SAS_TOKEN
-    */
     if (
         stripos($profilePhoto, "http://") === 0 ||
         stripos($profilePhoto, "https://") === 0
     ) {
-        return $profilePhoto;
+        return appendSasToken($profilePhoto);
     }
 
-    /*
-      If the DB stores only the blob path, build the full URL using:
-      AZURE_BLOB_BASE_URL
-      AZURE_BLOB_CONTAINER
-      AZURE_STORAGE_SAS_TOKEN
-    */
     $baseUrl = rtrim(envValue("AZURE_BLOB_BASE_URL"), "/");
     $container = trim(envValue("AZURE_BLOB_CONTAINER"), "/");
-    $sasToken = normalizeSasToken(envValue("AZURE_STORAGE_SAS_TOKEN"));
 
     if ($baseUrl === "" || $container === "") {
         return $profilePhoto;
@@ -78,11 +80,6 @@ function buildProfilePhotoUrl(?string $profilePhoto): ?string
 
     $blobPath = ltrim($profilePhoto, "/");
 
-    /*
-      Prevent duplicate container name if profile_photo already starts with it.
-      Example:
-      profile_photo = customer-images/tenant-1/customer-1/photo.jpg
-    */
     if (strpos($blobPath, $container . "/") === 0) {
         $blobPath = substr($blobPath, strlen($container) + 1);
     }
@@ -92,13 +89,7 @@ function buildProfilePhotoUrl(?string $profilePhoto): ?string
         array_map("rawurlencode", explode("/", $blobPath))
     );
 
-    $url = "{$baseUrl}/{$container}/{$encodedBlobPath}";
-
-    if ($sasToken !== "") {
-        $url .= "?{$sasToken}";
-    }
-
-    return $url;
+    return appendSasToken("{$baseUrl}/{$container}/{$encodedBlobPath}");
 }
 
 try {
@@ -191,15 +182,7 @@ try {
             "nationality" => $row["nationality"],
             "birthplace" => null,
             "registered_at" => $row["created_at"],
-
-            /*
-              Keep old name for compatibility.
-            */
             "profile_photo" => $profileImageUrl,
-
-            /*
-              New name for the React Native Profile and Dashboard screens.
-            */
             "profile_image_url" => $profileImageUrl,
         ],
         "tenant" => [
