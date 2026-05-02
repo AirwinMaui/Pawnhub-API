@@ -43,44 +43,44 @@ try {
         exit;
     }
 
-    $customerStmt = $pdo->prepare("
+    $stmt = $pdo->prepare("
         SELECT id, tenant_id
         FROM customers
         WHERE username = :username
         LIMIT 1
     ");
 
-    $customerStmt->execute([
+    $stmt->execute([
         ':username' => $username,
     ]);
 
-    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
+    $customer = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$customer) {
         http_response_code(400);
-        echo json_encode(['success' => false, 'message' => 'Invalid reset code']);
+        echo json_encode(['success' => false, 'message' => 'Invalid or expired reset code']);
         exit;
     }
 
-    $codeStmt = $pdo->prepare("
+    $resetStmt = $pdo->prepare("
         SELECT id, code_hash
-        FROM password_reset_codes
+        FROM customer_password_resets
         WHERE customer_id = :customer_id
           AND tenant_id = :tenant_id
-          AND used_at IS NULL
-          AND expires_at > UTC_TIMESTAMP()
+          AND used = 0
+          AND expires_at > NOW()
         ORDER BY created_at DESC
         LIMIT 1
     ");
 
-    $codeStmt->execute([
+    $resetStmt->execute([
         ':customer_id' => $customer['id'],
         ':tenant_id' => $customer['tenant_id'],
     ]);
 
-    $resetRow = $codeStmt->fetch(PDO::FETCH_ASSOC);
+    $reset = $resetStmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$resetRow || !password_verify($resetCode, $resetRow['code_hash'])) {
+    if (!$reset || !password_verify($resetCode, $reset['code_hash'])) {
         http_response_code(400);
         echo json_encode(['success' => false, 'message' => 'Invalid or expired reset code']);
         exit;
@@ -88,29 +88,29 @@ try {
 
     $pdo->beginTransaction();
 
-    $newHash = password_hash($newPassword, PASSWORD_DEFAULT);
+    $newHash = password_hash($newPassword, PASSWORD_BCRYPT);
 
-    $updatePasswordStmt = $pdo->prepare("
+    $updateStmt = $pdo->prepare("
         UPDATE customers
         SET password_hash = :password_hash
         WHERE id = :customer_id
           AND tenant_id = :tenant_id
     ");
 
-    $updatePasswordStmt->execute([
+    $updateStmt->execute([
         ':password_hash' => $newHash,
         ':customer_id' => $customer['id'],
         ':tenant_id' => $customer['tenant_id'],
     ]);
 
-    $markUsedStmt = $pdo->prepare("
-        UPDATE password_reset_codes
-        SET used_at = UTC_TIMESTAMP()
+    $usedStmt = $pdo->prepare("
+        UPDATE customer_password_resets
+        SET used = 1
         WHERE id = :id
     ");
 
-    $markUsedStmt->execute([
-        ':id' => $resetRow['id'],
+    $usedStmt->execute([
+        ':id' => $reset['id'],
     ]);
 
     $pdo->commit();
@@ -122,9 +122,11 @@ try {
     exit;
 
 } catch (Throwable $e) {
-    if ($pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
+
+    error_log('Mobile reset password error: ' . $e->getMessage());
 
     http_response_code(500);
     echo json_encode([
