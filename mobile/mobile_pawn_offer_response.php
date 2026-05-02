@@ -177,6 +177,7 @@ try {
     $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
     $requestNo = trim((string)($data['request_no'] ?? $data['requestNo'] ?? ''));
     $action = strtolower(trim((string)($data['action'] ?? '')));
+    $verificationId = (int)($data['verification_id'] ?? $data['verificationId'] ?? 0);
 
     if ($action === 'reject') {
         $action = 'decline';
@@ -200,10 +201,6 @@ try {
 
     $pdo->beginTransaction();
 
-    /*
-     * Get customer data.
-     * SELECT * is used to avoid crashes if your mobile_customers columns differ.
-     */
     $customerStmt = $pdo->prepare("
         SELECT *
         FROM mobile_customers
@@ -229,9 +226,6 @@ try {
         ]);
     }
 
-    /*
-     * Get the approved pawn request.
-     */
     $requestStmt = $pdo->prepare("
         SELECT *
         FROM pawn_requests
@@ -269,10 +263,6 @@ try {
         ]);
     }
 
-    /*
-     * Customer rejects the offer.
-     * No pawn transaction is created.
-     */
     if ($action === 'decline') {
         $rejectStmt = $pdo->prepare("
             UPDATE pawn_requests
@@ -295,9 +285,6 @@ try {
         ]);
     }
 
-    /*
-     * Prevent duplicate transaction creation.
-     */
     $existingStmt = $pdo->prepare("
         SELECT id, ticket_no
         FROM pawn_transactions
@@ -336,10 +323,43 @@ try {
         ]);
     }
 
-    /*
-     * Customer accepts the offer.
-     * A real pawn transaction is created here.
-     */
+    if ($verificationId <= 0) {
+        $pdo->rollBack();
+
+        respond(400, [
+            'success' => false,
+            'message' => 'Valid ID verification is required before accepting this offer.',
+        ]);
+    }
+
+    $verificationStmt = $pdo->prepare("
+        SELECT *
+        FROM mobile_customer_id_verifications
+        WHERE id = :verification_id
+          AND tenant_id = :tenant_id
+          AND customer_id = :customer_id
+          AND request_no = :request_no
+        LIMIT 1
+    ");
+
+    $verificationStmt->execute([
+        ':verification_id' => $verificationId,
+        ':tenant_id' => $tenantId,
+        ':customer_id' => $customerId,
+        ':request_no' => $requestNo,
+    ]);
+
+    $verification = $verificationStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (!$verification) {
+        $pdo->rollBack();
+
+        respond(400, [
+            'success' => false,
+            'message' => 'ID verification was not found. Please upload a valid ID first.',
+        ]);
+    }
+
     $offerAmount = (float)($request['offer_amount'] ?? 0);
     $appraisalValue = (float)($request['appraisal_value'] ?? 0);
     $interestRate = (float)($request['interest_rate'] ?? 0);
@@ -389,8 +409,8 @@ try {
     $nationality = getNullableStringValue($customer, ['nationality']);
     $birthplace = getNullableStringValue($customer, ['birthplace', 'place_of_birth']);
 
-    $validIdType = getStringValue($customer, ['valid_id_type', 'id_type'], 'N/A');
-    $validIdNumber = getStringValue($customer, ['valid_id_number', 'id_number'], 'N/A');
+    $validIdType = getStringValue($verification, ['id_type'], 'Valid ID');
+    $validIdNumber = 'MOBILE-ID-' . (string)$verification['id'];
 
     $customerPhotoPath = getNullableStringValue($customer, ['customer_photo_path', 'photo_path']);
     $signaturePath = getNullableStringValue($customer, ['signature_path']);
@@ -555,6 +575,8 @@ try {
         ':item_photo_path' => $itemPhotoPath,
     ]);
 
+    $transactionId = (int)$pdo->lastInsertId();
+
     $updateRequestStmt = $pdo->prepare("
         UPDATE pawn_requests
         SET status = 'customer_accepted',
@@ -568,12 +590,29 @@ try {
         ':tenant_id' => $tenantId,
     ]);
 
+    $updateVerificationStmt = $pdo->prepare("
+        UPDATE mobile_customer_id_verifications
+        SET status = 'used',
+            updated_at = NOW()
+        WHERE id = :id
+          AND tenant_id = :tenant_id
+          AND customer_id = :customer_id
+    ");
+
+    $updateVerificationStmt->execute([
+        ':id' => $verificationId,
+        ':tenant_id' => $tenantId,
+        ':customer_id' => $customerId,
+    ]);
+
     $pdo->commit();
 
     respond(200, [
         'success' => true,
-        'message' => 'Offer accepted successfully',
+        'message' => 'Offer accepted successfully. ID verification was submitted.',
         'ticket_no' => $ticketNo,
+        'transaction_id' => $transactionId,
+        'verification_id' => $verificationId,
     ]);
 } catch (Throwable $e) {
     if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
