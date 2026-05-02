@@ -165,20 +165,35 @@ function detectNotifications(PDO $pdo, int $tenantId, int $customerId): void
             );
         }
 
-        if (in_array($status, ["approved", "accepted"], true)) {
-            addNotification(
-                $pdo,
-                $tenantId,
-                $customerId,
-                "request_approved",
-                "Pawn request approved",
-                "Your request {$requestNo} for {$category} has been approved.",
-                "pawn_request",
-                $requestId,
-                "my-loans",
-                ["requestId" => $requestId]
-            );
-        }
+        if ($status === "approved") {
+    addNotification(
+        $pdo,
+        $tenantId,
+        $customerId,
+        "request_offer_made",
+        "Offer received",
+        "An offer has been made for your request {$requestNo} for {$category}. You may accept or decline it.",
+        "pawn_request",
+        $requestId,
+        "my-loans",
+        ["requestId" => $requestId]
+    );
+}
+
+if ($status === "accepted") {
+    addNotification(
+        $pdo,
+        $tenantId,
+        $customerId,
+        "request_accepted",
+        "Offer accepted",
+        "You accepted the offer for request {$requestNo} for {$category}.",
+        "pawn_request",
+        $requestId,
+        "my-loans",
+        ["requestId" => $requestId]
+    );
+}}
 
         if (in_array($status, ["rejected", "declined"], true)) {
             addNotification(
@@ -275,7 +290,7 @@ function detectNotifications(PDO $pdo, int $tenantId, int $customerId): void
             );
         }
     }
-}
+
 
 try {
     $input = getInput();
