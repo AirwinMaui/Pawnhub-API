@@ -21,6 +21,13 @@ function respond(int $statusCode, array $payload): void
     exit;
 }
 
+function buildUrlWithQuery(string $baseUrl, array $params): string
+{
+    $separator = str_contains($baseUrl, '?') ? '&' : '?';
+
+    return $baseUrl . $separator . http_build_query($params);
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(405, [
         'success' => false,
@@ -30,7 +37,7 @@ if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
 
 try {
     $rawInput = file_get_contents('php://input');
-    $input = json_decode($rawInput, true);
+    $input = json_decode((string)$rawInput, true);
 
     if (!is_array($input)) {
         respond(400, [
@@ -45,8 +52,8 @@ try {
     $productId = intval($input['product_id'] ?? 0);
 
     /*
-      Since item_inventory represents one actual pawned item,
-      force quantity to 1 so the same item cannot be bought multiple times.
+      One item_inventory row represents one actual item.
+      Force quantity to 1 to prevent buying the same item more than once.
     */
     $quantity = 1;
 
@@ -108,8 +115,14 @@ try {
         WHERE id = ?
           AND tenant_id = ?
           AND is_shop_visible = 1
-          AND stock_qty > 0
-          AND LOWER(COALESCE(status, '')) NOT IN ('sold', 'released')
+          AND COALESCE(stock_qty, 0) > 0
+          AND LOWER(TRIM(COALESCE(status, ''))) NOT IN (
+              'sold',
+              'sold out',
+              'released',
+              'reserved',
+              'unavailable'
+          )
         LIMIT 1
         FOR UPDATE
     ");
@@ -126,7 +139,7 @@ try {
 
         respond(409, [
             'success' => false,
-            'message' => 'Sorry, this item has already been sold or is no longer available.',
+            'message' => 'Sorry, this item is already sold out or no longer available.',
         ]);
     }
 
@@ -137,7 +150,7 @@ try {
 
         respond(409, [
             'success' => false,
-            'message' => 'Sorry, this item has already been sold or is no longer available.',
+            'message' => 'Sorry, this item is already sold out or no longer available.',
         ]);
     }
 
@@ -164,8 +177,7 @@ try {
 
     /*
       Mark item as sold immediately.
-      This makes it disappear from the shop because mobile_storefront.php
-      only shows items with is_shop_visible = 1 and stock_qty > 0.
+      This hides the item from the shop for all customers in the same tenant.
     */
     $markSoldStmt = $pdo->prepare("
         UPDATE item_inventory
@@ -179,8 +191,14 @@ try {
         WHERE id = ?
           AND tenant_id = ?
           AND is_shop_visible = 1
-          AND stock_qty > 0
-          AND LOWER(COALESCE(status, '')) NOT IN ('sold', 'released')
+          AND COALESCE(stock_qty, 0) > 0
+          AND LOWER(TRIM(COALESCE(status, ''))) NOT IN (
+              'sold',
+              'sold out',
+              'released',
+              'reserved',
+              'unavailable'
+          )
     ");
 
     $markSoldStmt->execute([
@@ -194,7 +212,7 @@ try {
 
         respond(409, [
             'success' => false,
-            'message' => 'Sorry, this item has already been sold.',
+            'message' => 'Sorry, this item is already sold out.',
         ]);
     }
 
@@ -210,9 +228,8 @@ try {
     $customerPhone = trim((string)($customer['contact_number'] ?? ''));
 
     /*
-      Your shop_orders.user_id is NOT NULL.
+      shop_orders.user_id is NOT NULL.
       This uses customer_id as user_id for mobile checkout.
-      If your staff/admin users table needs a different value, replace this.
     */
     $userId = $customerId;
 
@@ -340,19 +357,19 @@ try {
 
     $amountInCentavos = intval(round($totalAmount * 100));
 
-    $successUrl =
-        PAYMONGO_SUCCESS_URL .
-        '?type=shop' .
-        '&tenant_id=' . urlencode((string)$tenantId) .
-        '&customer_id=' . urlencode((string)$customerId) .
-        '&order_id=' . urlencode((string)$orderId);
+    $successUrl = buildUrlWithQuery(PAYMONGO_SUCCESS_URL, [
+        'type' => 'shop',
+        'tenant_id' => $tenantId,
+        'customer_id' => $customerId,
+        'order_id' => $orderId,
+    ]);
 
-    $cancelUrl =
-        PAYMONGO_CANCEL_URL .
-        '&type=shop' .
-        '&tenant_id=' . urlencode((string)$tenantId) .
-        '&customer_id=' . urlencode((string)$customerId) .
-        '&order_id=' . urlencode((string)$orderId);
+    $cancelUrl = buildUrlWithQuery(PAYMONGO_CANCEL_URL, [
+        'type' => 'shop',
+        'tenant_id' => $tenantId,
+        'customer_id' => $customerId,
+        'order_id' => $orderId,
+    ]);
 
     $payload = [
         'data' => [

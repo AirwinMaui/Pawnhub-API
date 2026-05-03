@@ -33,6 +33,7 @@ function requestData(): array
     }
 
     $raw = file_get_contents("php://input");
+
     if ($raw !== false && trim($raw) !== '') {
         $json = json_decode($raw, true);
 
@@ -60,7 +61,7 @@ function getIntParam(string $key): ?int
         return null;
     }
 
-    return (int) $value;
+    return (int)$value;
 }
 
 function getStringParam(string $key, int $maxLen = 100): string
@@ -108,7 +109,7 @@ function mapCategoryIcon(string $category): string
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     respond(500, [
         "success" => false,
-        "message" => "PDO missing"
+        "message" => "PDO missing",
     ]);
 }
 
@@ -121,7 +122,7 @@ if (!$tenantId) {
     respond(400, [
         "success" => false,
         "message" => "Missing tenant",
-        "debug" => requestData()
+        "debug" => requestData(),
     ]);
 }
 
@@ -133,39 +134,49 @@ try {
     $stmt = $pdo->prepare("
         SELECT id, business_name AS name, status
         FROM tenants
-        WHERE id = :tenant
+        WHERE id = ?
         LIMIT 1
     ");
-    $stmt->execute(["tenant" => $tenantId]);
+
+    $stmt->execute([$tenantId]);
     $tenant = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$tenant) {
         respond(404, [
             "success" => false,
             "message" => "Tenant not found",
-            "tenant_passed" => $tenantId
+            "tenant_passed" => $tenantId,
         ]);
     }
 
     $catStmt = $pdo->prepare("
         SELECT id, name AS label, icon
         FROM shop_categories
-        WHERE tenant_id = :tenant AND is_active = 1
+        WHERE tenant_id = ?
+          AND is_active = 1
         ORDER BY sort_order ASC, name ASC
     ");
-    $catStmt->execute(["tenant" => $tenantId]);
+
+    $catStmt->execute([$tenantId]);
     $categoryRows = $catStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $categories = [];
 
     foreach ($categoryRows as $row) {
         $categories[] = [
-            "id"    => (string) $row["id"],
-            "label" => (string) $row["label"],
-            "icon"  => $row["icon"] ?: mapCategoryIcon((string) $row["label"]),
+            "id" => (string)$row["id"],
+            "label" => (string)$row["label"],
+            "icon" => $row["icon"] ?: mapCategoryIcon((string)$row["label"]),
         ];
     }
 
+    /*
+      Sold-out items are excluded here.
+      Conditions:
+      - must be visible
+      - must have stock
+      - must not have a sold/released/reserved status
+    */
     $featuredStmt = $pdo->prepare("
         SELECT
             i.id,
@@ -179,34 +190,42 @@ try {
             c.name AS cat_name
         FROM item_inventory i
         LEFT JOIN shop_categories c ON c.id = i.category_id
-        WHERE i.tenant_id = :tenant
+        WHERE i.tenant_id = ?
           AND i.is_shop_visible = 1
-          AND i.stock_qty > 0
-          AND LOWER(COALESCE(i.status, '')) <> 'sold'
+          AND COALESCE(i.stock_qty, 0) > 0
+          AND LOWER(TRIM(COALESCE(i.status, ''))) NOT IN (
+              'sold',
+              'sold out',
+              'released',
+              'reserved',
+              'unavailable'
+          )
         ORDER BY i.is_featured DESC, i.display_price DESC, i.id DESC
         LIMIT 1
     ");
-    $featuredStmt->execute(["tenant" => $tenantId]);
+
+    $featuredStmt->execute([$tenantId]);
     $featuredRow = $featuredStmt->fetch(PDO::FETCH_ASSOC);
 
     $featured = null;
 
     if ($featuredRow) {
         $price = (float)(
-            $featuredRow["display_price"] > 0
+            ((float)$featuredRow["display_price"] > 0)
                 ? $featuredRow["display_price"]
                 : $featuredRow["appraisal_value"]
         );
 
         $featured = [
-            "id"       => (string) $featuredRow["id"],
-            "name"     => (string) $featuredRow["item_name"],
+            "id" => (string)$featuredRow["id"],
+            "name" => (string)$featuredRow["item_name"],
             "subtitle" => (int)$featuredRow["is_featured"] === 1
                 ? "Featured item"
                 : "Top valued item in this shop",
-            "image"    => fullImageUrl((string) ($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
-            "price"    => number_format($price, 2),
-            "category" => (string) ($featuredRow["cat_name"] ?? $featuredRow["item_category"] ?? "General"),
+            "image" => fullImageUrl((string)($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
+            "price" => number_format($price, 2),
+            "category" => (string)($featuredRow["cat_name"] ?? $featuredRow["item_category"] ?? "General"),
+            "status" => (string)($featuredRow["status"] ?? ""),
         ];
     }
 
@@ -228,43 +247,44 @@ try {
             c.icon AS cat_icon
         FROM item_inventory i
         LEFT JOIN shop_categories c ON c.id = i.category_id
-        WHERE i.tenant_id = :tenant
+        WHERE i.tenant_id = ?
           AND i.is_shop_visible = 1
-          AND i.stock_qty > 0
-          AND LOWER(COALESCE(i.status, '')) <> 'sold'
+          AND COALESCE(i.stock_qty, 0) > 0
+          AND LOWER(TRIM(COALESCE(i.status, ''))) NOT IN (
+              'sold',
+              'sold out',
+              'released',
+              'reserved',
+              'unavailable'
+          )
     ";
 
-    $params = ["tenant" => $tenantId];
+    $params = [$tenantId];
 
     if ($search !== '') {
-        $sql .= " AND (
-            i.item_name LIKE :search
-            OR i.item_category LIKE :search
-            OR c.name LIKE :search
-        )";
+        $sql .= "
+          AND (
+              i.item_name LIKE ?
+              OR i.item_category LIKE ?
+              OR c.name LIKE ?
+          )
+        ";
 
-        $params["search"] = "%" . $search . "%";
+        $searchLike = "%" . $search . "%";
+        $params[] = $searchLike;
+        $params[] = $searchLike;
+        $params[] = $searchLike;
     }
 
     if ($selectedCategoryId !== null) {
-        $sql .= " AND i.category_id = :cat_id";
-        $params["cat_id"] = $selectedCategoryId;
+        $sql .= " AND i.category_id = ?";
+        $params[] = $selectedCategoryId;
     }
 
-    $sql .= " ORDER BY i.is_featured DESC, i.sort_order ASC, i.id DESC LIMIT :limit";
+    $sql .= " ORDER BY i.is_featured DESC, i.sort_order ASC, i.id DESC LIMIT " . $limit;
 
     $productsStmt = $pdo->prepare($sql);
-
-    foreach ($params as $key => $value) {
-        $productsStmt->bindValue(
-            ":" . $key,
-            $value,
-            is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
-        );
-    }
-
-    $productsStmt->bindValue(":limit", $limit, PDO::PARAM_INT);
-    $productsStmt->execute();
+    $productsStmt->execute($params);
 
     $rows = $productsStmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -272,7 +292,7 @@ try {
 
     foreach ($rows as $row) {
         $rawPrice = (float)(
-            $row["display_price"] > 0
+            ((float)$row["display_price"] > 0)
                 ? $row["display_price"]
                 : $row["appraisal_value"]
         );
@@ -288,26 +308,27 @@ try {
         }
 
         $products[] = [
-            "id"            => (string) $row["id"],
-            "name"          => (string) $row["item_name"],
-            "category"      => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General"),
-            "category_icon" => (string) ($row["cat_icon"] ?? mapCategoryIcon($row["item_category"] ?? "")),
-            "price"         => "₱" . number_format($rawPrice, 2),
-            "raw_price"     => number_format($rawPrice, 2, '.', ''),
-            "image"         => fullImageUrl((string) ($row["item_photo_path"] ?? ""), $imageBaseUrl),
-            "badge"         => $badge,
-            "stock_qty"     => (int) $row["stock_qty"],
-            "condition"     => (string) ($row["condition_notes"] ?? ""),
-            "description"   => (string) ($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
+            "id" => (string)$row["id"],
+            "name" => (string)$row["item_name"],
+            "category" => (string)($row["cat_name"] ?? $row["item_category"] ?? "General"),
+            "category_icon" => (string)($row["cat_icon"] ?? mapCategoryIcon($row["item_category"] ?? "")),
+            "price" => "₱" . number_format($rawPrice, 2),
+            "raw_price" => number_format($rawPrice, 2, '.', ''),
+            "image" => fullImageUrl((string)($row["item_photo_path"] ?? ""), $imageBaseUrl),
+            "badge" => $badge,
+            "stock_qty" => (int)$row["stock_qty"],
+            "status" => (string)($row["status"] ?? ""),
+            "condition" => (string)($row["condition_notes"] ?? ""),
+            "description" => (string)($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
         ];
     }
 
     respond(200, [
         "success" => true,
         "tenant" => [
-            "id" => (int) $tenant["id"],
-            "name" => (string) $tenant["name"],
-            "status" => (string) $tenant["status"],
+            "id" => (int)$tenant["id"],
+            "name" => (string)$tenant["name"],
+            "status" => (string)$tenant["status"],
         ],
         "filters" => [
             "search" => $search,
@@ -321,6 +342,6 @@ try {
     respond(500, [
         "success" => false,
         "message" => "Storefront query failed",
-        "error" => $e->getMessage()
+        "error" => $e->getMessage(),
     ]);
 }
