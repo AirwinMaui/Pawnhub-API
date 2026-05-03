@@ -106,6 +106,35 @@ function mapCategoryIcon(string $category): string
     };
 }
 
+function normalizeStatus(?string $status): string
+{
+    return strtolower(trim((string)$status));
+}
+
+function isInventoryAvailable(array $row): bool
+{
+    $stockQty = (int)($row["stock_qty"] ?? 0);
+    $status = normalizeStatus((string)($row["status"] ?? ""));
+
+    $unavailableStatuses = [
+        "sold",
+        "sold out",
+        "released",
+        "reserved",
+        "unavailable",
+    ];
+
+    if ($stockQty <= 0) {
+        return false;
+    }
+
+    if (in_array($status, $unavailableStatuses, true)) {
+        return false;
+    }
+
+    return true;
+}
+
 if (!isset($pdo) || !($pdo instanceof PDO)) {
     respond(500, [
         "success" => false,
@@ -116,7 +145,7 @@ if (!isset($pdo) || !($pdo instanceof PDO)) {
 $tenantId = getIntParam("tenant");
 $categoryId = getIntParam("category_id");
 $search = getStringParam("keyword");
-$limit = getIntParam("limit") ?? 20;
+$limit = getIntParam("limit") ?? 30;
 
 if (!$tenantId) {
     respond(400, [
@@ -126,7 +155,7 @@ if (!$tenantId) {
     ]);
 }
 
-$limit = max(1, min($limit, 50));
+$limit = max(1, min($limit, 100));
 
 $imageBaseUrl = "https://pawnhub-api-hqfkfxdaddhnfthf.southeastasia-01.azurewebsites.net/";
 
@@ -171,11 +200,8 @@ try {
     }
 
     /*
-      Sold-out items are excluded here.
-      Conditions:
-      - must be visible
-      - must have stock
-      - must not have a sold/released/reserved status
+      Featured item should only be available.
+      Sold-out items stay in the product grid, but not in the featured banner.
     */
     $featuredStmt = $pdo->prepare("
         SELECT
@@ -186,6 +212,7 @@ try {
             i.display_price,
             i.appraisal_value,
             i.is_featured,
+            i.stock_qty,
             i.status,
             c.name AS cat_name
         FROM item_inventory i
@@ -223,14 +250,20 @@ try {
                 ? "Featured item"
                 : "Top valued item in this shop",
             "image" => fullImageUrl((string)($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
-            "price" => number_format($price, 2),
+            "price" => number_format($price, 2, '.', ''),
             "category" => (string)($featuredRow["cat_name"] ?? $featuredRow["item_category"] ?? "General"),
+            "stock_qty" => (int)($featuredRow["stock_qty"] ?? 0),
             "status" => (string)($featuredRow["status"] ?? ""),
+            "is_available" => true,
         ];
     }
 
     $selectedCategoryId = $categoryId;
 
+    /*
+      Product grid returns visible items, including sold-out items.
+      The app will display sold-out items with disabled actions.
+    */
     $sql = "
         SELECT
             i.id,
@@ -249,14 +282,6 @@ try {
         LEFT JOIN shop_categories c ON c.id = i.category_id
         WHERE i.tenant_id = ?
           AND i.is_shop_visible = 1
-          AND COALESCE(i.stock_qty, 0) > 0
-          AND LOWER(TRIM(COALESCE(i.status, ''))) NOT IN (
-              'sold',
-              'sold out',
-              'released',
-              'reserved',
-              'unavailable'
-          )
     ";
 
     $params = [$tenantId];
@@ -281,7 +306,27 @@ try {
         $params[] = $selectedCategoryId;
     }
 
-    $sql .= " ORDER BY i.is_featured DESC, i.sort_order ASC, i.id DESC LIMIT " . $limit;
+    /*
+      Available items first, sold-out items last.
+    */
+    $sql .= "
+        ORDER BY
+            CASE
+                WHEN COALESCE(i.stock_qty, 0) > 0
+                 AND LOWER(TRIM(COALESCE(i.status, ''))) NOT IN (
+                    'sold',
+                    'sold out',
+                    'released',
+                    'reserved',
+                    'unavailable'
+                 )
+                THEN 0
+                ELSE 1
+            END ASC,
+            i.is_featured DESC,
+            i.sort_order ASC,
+            i.id DESC
+        LIMIT " . $limit;
 
     $productsStmt = $pdo->prepare($sql);
     $productsStmt->execute($params);
@@ -297,9 +342,13 @@ try {
                 : $row["appraisal_value"]
         );
 
+        $isAvailable = isInventoryAvailable($row);
+
         $badge = null;
 
-        if ((int)$row["is_featured"] === 1) {
+        if (!$isAvailable) {
+            $badge = "Sold Out";
+        } elseif ((int)$row["is_featured"] === 1) {
             $badge = "Featured";
         } elseif ($rawPrice >= 50000) {
             $badge = "Premium";
@@ -307,19 +356,24 @@ try {
             $badge = "Popular";
         }
 
+        $category = (string)($row["cat_name"] ?? $row["item_category"] ?? "General");
+
         $products[] = [
             "id" => (string)$row["id"],
             "name" => (string)$row["item_name"],
-            "category" => (string)($row["cat_name"] ?? $row["item_category"] ?? "General"),
-            "category_icon" => (string)($row["cat_icon"] ?? mapCategoryIcon($row["item_category"] ?? "")),
+            "category" => $category,
+            "category_icon" => (string)($row["cat_icon"] ?? mapCategoryIcon((string)($row["item_category"] ?? ""))),
             "price" => "₱" . number_format($rawPrice, 2),
             "raw_price" => number_format($rawPrice, 2, '.', ''),
             "image" => fullImageUrl((string)($row["item_photo_path"] ?? ""), $imageBaseUrl),
             "badge" => $badge,
-            "stock_qty" => (int)$row["stock_qty"],
+            "stock_qty" => (int)($row["stock_qty"] ?? 0),
             "status" => (string)($row["status"] ?? ""),
+            "is_available" => $isAvailable,
             "condition" => (string)($row["condition_notes"] ?? ""),
-            "description" => (string)($row["cat_name"] ?? $row["item_category"] ?? "General") . " item available for purchase",
+            "description" => $isAvailable
+                ? $category . " item available for purchase"
+                : $category . " item is sold out",
         ];
     }
 
