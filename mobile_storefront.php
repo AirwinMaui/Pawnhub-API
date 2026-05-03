@@ -35,11 +35,13 @@ function requestData(): array
     $raw = file_get_contents("php://input");
     if ($raw !== false && trim($raw) !== '') {
         $json = json_decode($raw, true);
+
         if (is_array($json)) {
             $data = array_merge($data, $json);
         } else {
             $parsed = [];
             parse_str($raw, $parsed);
+
             if (is_array($parsed) && !empty($parsed)) {
                 $data = array_merge($data, $parsed);
             }
@@ -155,6 +157,7 @@ try {
     $categoryRows = $catStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $categories = [];
+
     foreach ($categoryRows as $row) {
         $categories[] = [
             "id"    => (string) $row["id"],
@@ -165,14 +168,21 @@ try {
 
     $featuredStmt = $pdo->prepare("
         SELECT
-            i.id, i.item_name, i.item_category, i.item_photo_path,
-            i.display_price, i.appraisal_value, i.is_featured,
+            i.id,
+            i.item_name,
+            i.item_category,
+            i.item_photo_path,
+            i.display_price,
+            i.appraisal_value,
+            i.is_featured,
+            i.status,
             c.name AS cat_name
         FROM item_inventory i
         LEFT JOIN shop_categories c ON c.id = i.category_id
         WHERE i.tenant_id = :tenant
           AND i.is_shop_visible = 1
           AND i.stock_qty > 0
+          AND LOWER(COALESCE(i.status, '')) <> 'sold'
         ORDER BY i.is_featured DESC, i.display_price DESC, i.id DESC
         LIMIT 1
     ");
@@ -180,12 +190,20 @@ try {
     $featuredRow = $featuredStmt->fetch(PDO::FETCH_ASSOC);
 
     $featured = null;
+
     if ($featuredRow) {
-        $price = (float)($featuredRow["display_price"] > 0 ? $featuredRow["display_price"] : $featuredRow["appraisal_value"]);
+        $price = (float)(
+            $featuredRow["display_price"] > 0
+                ? $featuredRow["display_price"]
+                : $featuredRow["appraisal_value"]
+        );
+
         $featured = [
             "id"       => (string) $featuredRow["id"],
             "name"     => (string) $featuredRow["item_name"],
-            "subtitle" => (int)$featuredRow["is_featured"] === 1 ? "Featured item" : "Top valued item in this shop",
+            "subtitle" => (int)$featuredRow["is_featured"] === 1
+                ? "Featured item"
+                : "Top valued item in this shop",
             "image"    => fullImageUrl((string) ($featuredRow["item_photo_path"] ?? ""), $imageBaseUrl),
             "price"    => number_format($price, 2),
             "category" => (string) ($featuredRow["cat_name"] ?? $featuredRow["item_category"] ?? "General"),
@@ -196,21 +214,35 @@ try {
 
     $sql = "
         SELECT
-            i.id, i.item_name, i.item_category, i.item_photo_path,
-            i.display_price, i.appraisal_value, i.is_featured,
-            i.stock_qty, i.condition_notes,
-            c.name AS cat_name, c.icon AS cat_icon
+            i.id,
+            i.item_name,
+            i.item_category,
+            i.item_photo_path,
+            i.display_price,
+            i.appraisal_value,
+            i.is_featured,
+            i.stock_qty,
+            i.condition_notes,
+            i.status,
+            c.name AS cat_name,
+            c.icon AS cat_icon
         FROM item_inventory i
         LEFT JOIN shop_categories c ON c.id = i.category_id
         WHERE i.tenant_id = :tenant
           AND i.is_shop_visible = 1
           AND i.stock_qty > 0
+          AND LOWER(COALESCE(i.status, '')) <> 'sold'
     ";
 
     $params = ["tenant" => $tenantId];
 
     if ($search !== '') {
-        $sql .= " AND (i.item_name LIKE :search OR i.item_category LIKE :search OR c.name LIKE :search)";
+        $sql .= " AND (
+            i.item_name LIKE :search
+            OR i.item_category LIKE :search
+            OR c.name LIKE :search
+        )";
+
         $params["search"] = "%" . $search . "%";
     }
 
@@ -222,19 +254,31 @@ try {
     $sql .= " ORDER BY i.is_featured DESC, i.sort_order ASC, i.id DESC LIMIT :limit";
 
     $productsStmt = $pdo->prepare($sql);
+
     foreach ($params as $key => $value) {
-        $productsStmt->bindValue(":" . $key, $value, is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR);
+        $productsStmt->bindValue(
+            ":" . $key,
+            $value,
+            is_int($value) ? PDO::PARAM_INT : PDO::PARAM_STR
+        );
     }
+
     $productsStmt->bindValue(":limit", $limit, PDO::PARAM_INT);
     $productsStmt->execute();
 
     $rows = $productsStmt->fetchAll(PDO::FETCH_ASSOC);
 
     $products = [];
+
     foreach ($rows as $row) {
-        $rawPrice = (float)($row["display_price"] > 0 ? $row["display_price"] : $row["appraisal_value"]);
+        $rawPrice = (float)(
+            $row["display_price"] > 0
+                ? $row["display_price"]
+                : $row["appraisal_value"]
+        );
 
         $badge = null;
+
         if ((int)$row["is_featured"] === 1) {
             $badge = "Featured";
         } elseif ($rawPrice >= 50000) {

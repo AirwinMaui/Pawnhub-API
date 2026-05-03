@@ -43,16 +43,21 @@ try {
     $customerId = intval($input['customer_id'] ?? 0);
     $customerNameFromApp = trim((string)($input['customer_name'] ?? 'PawnHub Customer'));
     $productId = intval($input['product_id'] ?? 0);
-    $quantity = intval($input['quantity'] ?? 1);
+
+    /*
+      Since item_inventory represents one actual pawned item,
+      force quantity to 1 so the same item cannot be bought multiple times.
+    */
+    $quantity = 1;
 
     $streetAddress = trim((string)($input['street_address'] ?? ''));
     $city = trim((string)($input['city'] ?? ''));
     $postalCode = trim((string)($input['postal_code'] ?? ''));
 
-    if ($tenantId <= 0 || $customerId <= 0 || $productId <= 0 || $quantity <= 0) {
+    if ($tenantId <= 0 || $customerId <= 0 || $productId <= 0) {
         respond(400, [
             'success' => false,
-            'message' => 'Missing tenant, customer, product, or quantity.',
+            'message' => 'Missing tenant, customer, or product.',
         ]);
     }
 
@@ -65,18 +70,21 @@ try {
 
     $pdo->beginTransaction();
 
+    /*
+      Check customer.
+    */
     $customerStmt = $pdo->prepare("
         SELECT id, tenant_id, full_name, email, contact_number
         FROM mobile_customers
-        WHERE id = :customer_id
-          AND tenant_id = :tenant_id
+        WHERE id = ?
+          AND tenant_id = ?
           AND is_active = 1
         LIMIT 1
     ");
 
     $customerStmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
+        $customerId,
+        $tenantId,
     ]);
 
     $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
@@ -90,19 +98,25 @@ try {
         ]);
     }
 
+    /*
+      Lock the item row.
+      This prevents two customers from buying the same item at the same time.
+    */
     $itemStmt = $pdo->prepare("
         SELECT *
         FROM item_inventory
-        WHERE id = :id
-          AND tenant_id = :tenant_id
+        WHERE id = ?
+          AND tenant_id = ?
           AND is_shop_visible = 1
+          AND stock_qty > 0
+          AND LOWER(COALESCE(status, '')) NOT IN ('sold', 'released')
         LIMIT 1
         FOR UPDATE
     ");
 
     $itemStmt->execute([
-        ':id' => $productId,
-        ':tenant_id' => $tenantId,
+        $productId,
+        $tenantId,
     ]);
 
     $item = $itemStmt->fetch(PDO::FETCH_ASSOC);
@@ -110,21 +124,20 @@ try {
     if (!$item) {
         $pdo->rollBack();
 
-        respond(404, [
+        respond(409, [
             'success' => false,
-            'message' => 'Shop item not found.',
+            'message' => 'Sorry, this item has already been sold or is no longer available.',
         ]);
     }
 
     $stockQty = intval($item['stock_qty'] ?? 0);
-    $itemStatus = strtolower((string)($item['status'] ?? ''));
 
-    if ($stockQty < $quantity || in_array($itemStatus, ['sold', 'released'], true)) {
+    if ($stockQty < 1) {
         $pdo->rollBack();
 
-        respond(400, [
+        respond(409, [
             'success' => false,
-            'message' => 'This item is no longer available.',
+            'message' => 'Sorry, this item has already been sold or is no longer available.',
         ]);
     }
 
@@ -149,6 +162,42 @@ try {
     $discountAmount = 0.00;
     $totalAmount = $subtotal + $shippingFee + $taxAmount - $discountAmount;
 
+    /*
+      Mark item as sold immediately.
+      This makes it disappear from the shop because mobile_storefront.php
+      only shows items with is_shop_visible = 1 and stock_qty > 0.
+    */
+    $markSoldStmt = $pdo->prepare("
+        UPDATE item_inventory
+        SET
+            stock_qty = 0,
+            is_shop_visible = 0,
+            status = 'sold',
+            sold_amount = ?,
+            sold_at = NOW(),
+            updated_at = NOW()
+        WHERE id = ?
+          AND tenant_id = ?
+          AND is_shop_visible = 1
+          AND stock_qty > 0
+          AND LOWER(COALESCE(status, '')) NOT IN ('sold', 'released')
+    ");
+
+    $markSoldStmt->execute([
+        $totalAmount,
+        $productId,
+        $tenantId,
+    ]);
+
+    if ($markSoldStmt->rowCount() !== 1) {
+        $pdo->rollBack();
+
+        respond(409, [
+            'success' => false,
+            'message' => 'Sorry, this item has already been sold.',
+        ]);
+    }
+
     $orderNumber = 'SHOP-' . date('YmdHis') . '-' . $customerId . '-' . random_int(1000, 9999);
 
     $customerName = trim((string)($customer['full_name'] ?? ''));
@@ -162,8 +211,8 @@ try {
 
     /*
       Your shop_orders.user_id is NOT NULL.
-      I am using customer_id as user_id for mobile checkout.
-      If your admin/staff users table uses a different ID, replace this.
+      This uses customer_id as user_id for mobile checkout.
+      If your staff/admin users table needs a different value, replace this.
     */
     $userId = $customerId;
 
@@ -195,52 +244,52 @@ try {
             created_at,
             updated_at
         ) VALUES (
-            :tenant_id,
-            :customer_id,
-            :customer_name,
-            :customer_email,
-            :customer_phone,
-            :shipping_full_name,
-            :shipping_street_address,
-            :shipping_city,
-            :shipping_postal_code,
-            :user_id,
-            :order_number,
-            :subtotal,
-            :shipping_fee,
-            :tax_amount,
-            :discount_amount,
-            :total_amount,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
             'paymongo',
             'pending',
             'paymongo',
             'pending',
             'pending',
             'pending',
-            :notes,
+            ?,
             NOW(),
             NOW()
         )
     ");
 
     $orderStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':customer_id' => $customerId,
-        ':customer_name' => $customerName,
-        ':customer_email' => $customerEmail,
-        ':customer_phone' => $customerPhone,
-        ':shipping_full_name' => $customerName,
-        ':shipping_street_address' => $streetAddress,
-        ':shipping_city' => $city,
-        ':shipping_postal_code' => $postalCode,
-        ':user_id' => $userId,
-        ':order_number' => $orderNumber,
-        ':subtotal' => $subtotal,
-        ':shipping_fee' => $shippingFee,
-        ':tax_amount' => $taxAmount,
-        ':discount_amount' => $discountAmount,
-        ':total_amount' => $totalAmount,
-        ':notes' => 'Created from mobile PayMongo checkout.',
+        $tenantId,
+        $customerId,
+        $customerName,
+        $customerEmail,
+        $customerPhone,
+        $customerName,
+        $streetAddress,
+        $city,
+        $postalCode,
+        $userId,
+        $orderNumber,
+        $subtotal,
+        $shippingFee,
+        $taxAmount,
+        $discountAmount,
+        $totalAmount,
+        'Created from mobile PayMongo checkout.',
     ]);
 
     $orderId = intval($pdo->lastInsertId());
@@ -263,30 +312,30 @@ try {
             item_status,
             created_at
         ) VALUES (
-            :tenant_id,
-            :order_id,
-            :inventory_item_id,
-            :product_name,
-            :product_category,
-            :product_image_url,
-            :quantity,
-            :unit_price,
-            :line_total,
-            'active',
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'sold',
             NOW()
         )
     ");
 
     $orderItemStmt->execute([
-        ':tenant_id' => $tenantId,
-        ':order_id' => $orderId,
-        ':inventory_item_id' => $productId,
-        ':product_name' => $itemName,
-        ':product_category' => $itemCategory,
-        ':product_image_url' => $itemImage,
-        ':quantity' => $quantity,
-        ':unit_price' => $unitPrice,
-        ':line_total' => $subtotal,
+        $tenantId,
+        $orderId,
+        $productId,
+        $itemName,
+        $itemCategory,
+        $itemImage,
+        $quantity,
+        $unitPrice,
+        $subtotal,
     ]);
 
     $amountInCentavos = intval(round($totalAmount * 100));
@@ -317,10 +366,10 @@ try {
                 'payment_method_types' => [
                     'card',
                     'gcash',
-                    'paymaya'
+                    'paymaya',
                 ],
                 'billing' => [
-                    'name' => $customerName
+                    'name' => $customerName,
                 ],
                 'line_items' => [
                     [
@@ -328,8 +377,8 @@ try {
                         'amount' => $amountInCentavos,
                         'name' => $itemName,
                         'description' => $itemCategory,
-                        'quantity' => $quantity
-                    ]
+                        'quantity' => $quantity,
+                    ],
                 ],
                 'metadata' => [
                     'payment_type' => 'shop',
@@ -340,10 +389,10 @@ try {
                     'inventory_item_id' => strval($productId),
                     'product_name' => $itemName,
                     'payment_amount' => strval($totalAmount),
-                    'quantity' => strval($quantity)
-                ]
-            ]
-        ]
+                    'quantity' => strval($quantity),
+                ],
+            ],
+        ],
     ];
 
     $ch = curl_init('https://api.paymongo.com/v1/checkout_sessions');
@@ -354,9 +403,9 @@ try {
         CURLOPT_HTTPHEADER => [
             'Content-Type: application/json',
             'Accept: application/json',
-            'Authorization: Basic ' . base64_encode(PAYMONGO_SECRET_KEY . ':')
+            'Authorization: Basic ' . base64_encode(PAYMONGO_SECRET_KEY . ':'),
         ],
-        CURLOPT_POSTFIELDS => json_encode($payload)
+        CURLOPT_POSTFIELDS => json_encode($payload),
     ]);
 
     $rawResponse = curl_exec($ch);
@@ -375,7 +424,7 @@ try {
         ]);
     }
 
-    $response = json_decode($rawResponse, true);
+    $response = json_decode((string)$rawResponse, true);
 
     if ($httpCode < 200 || $httpCode >= 300) {
         $pdo->rollBack();
@@ -402,16 +451,17 @@ try {
 
     $updateOrderStmt = $pdo->prepare("
         UPDATE shop_orders
-        SET payment_reference_number = :payment_reference_number,
+        SET
+            payment_reference_number = ?,
             updated_at = NOW()
-        WHERE id = :id
-          AND tenant_id = :tenant_id
+        WHERE id = ?
+          AND tenant_id = ?
     ");
 
     $updateOrderStmt->execute([
-        ':payment_reference_number' => $checkoutSessionId,
-        ':id' => $orderId,
-        ':tenant_id' => $tenantId,
+        $checkoutSessionId,
+        $orderId,
+        $tenantId,
     ]);
 
     $pdo->commit();
@@ -433,4 +483,4 @@ try {
         'message' => 'Server error.',
         'error' => $e->getMessage(),
     ]);
-}   
+}
