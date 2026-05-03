@@ -199,10 +199,6 @@ try {
         ];
     }
 
-    /*
-      Featured item should only be available.
-      Sold-out items stay in the product grid, but not in the featured banner.
-    */
     $featuredStmt = $pdo->prepare("
         SELECT
             i.id,
@@ -262,7 +258,7 @@ try {
 
     /*
       Product grid returns visible items, including sold-out items.
-      The app will display sold-out items with disabled actions.
+      Sold-out display is handled by ShopScreen.tsx.
     */
     $sql = "
         SELECT
@@ -306,9 +302,6 @@ try {
         $params[] = $selectedCategoryId;
     }
 
-    /*
-      Available items first, sold-out items last.
-    */
     $sql .= "
         ORDER BY
             CASE
