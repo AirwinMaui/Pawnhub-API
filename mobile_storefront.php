@@ -111,11 +111,8 @@ function normalizeStatus(?string $status): string
     return strtolower(trim((string)$status));
 }
 
-function isInventoryAvailable(array $row): bool
+function isUnavailableStatus(?string $status): bool
 {
-    $stockQty = (int)($row["stock_qty"] ?? 0);
-    $status = normalizeStatus((string)($row["status"] ?? ""));
-
     $unavailableStatuses = [
         "sold",
         "sold out",
@@ -124,11 +121,23 @@ function isInventoryAvailable(array $row): bool
         "unavailable",
     ];
 
+    return in_array(normalizeStatus($status), $unavailableStatuses, true);
+}
+
+function isInventoryAvailable(array $row): bool
+{
+    $stockQty = (int)($row["stock_qty"] ?? 0);
+    $status = normalizeStatus((string)($row["status"] ?? ""));
+
+    if (array_key_exists("is_shop_visible", $row) && (int)$row["is_shop_visible"] !== 1) {
+        return false;
+    }
+
     if ($stockQty <= 0) {
         return false;
     }
 
-    if (in_array($status, $unavailableStatuses, true)) {
+    if (isUnavailableStatus($status)) {
         return false;
     }
 
@@ -210,6 +219,7 @@ try {
             i.is_featured,
             i.stock_qty,
             i.status,
+            i.is_shop_visible,
             c.name AS cat_name
         FROM item_inventory i
         LEFT JOIN shop_categories c ON c.id = i.category_id
@@ -232,7 +242,7 @@ try {
 
     $featured = null;
 
-    if ($featuredRow) {
+    if ($featuredRow && isInventoryAvailable($featuredRow)) {
         $price = (float)(
             ((float)$featuredRow["display_price"] > 0)
                 ? $featuredRow["display_price"]
@@ -257,8 +267,8 @@ try {
     $selectedCategoryId = $categoryId;
 
     /*
-      Product grid returns visible items, including sold-out items.
-      Sold-out display is handled by ShopScreen.tsx.
+      Product grid returns visible items, including zero-stock items.
+      The app uses stock_qty and is_available to disable Add to Cart and Buy Now.
     */
     $sql = "
         SELECT
@@ -272,6 +282,7 @@ try {
             i.stock_qty,
             i.condition_notes,
             i.status,
+            i.is_shop_visible,
             c.name AS cat_name,
             c.icon AS cat_icon
         FROM item_inventory i

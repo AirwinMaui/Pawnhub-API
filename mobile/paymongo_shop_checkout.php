@@ -28,6 +28,24 @@ function buildUrlWithQuery(string $baseUrl, array $params): string
     return $baseUrl . $separator . http_build_query($params);
 }
 
+function normalizeInventoryStatus(?string $status): string
+{
+    return strtolower(trim((string)$status));
+}
+
+function isUnavailableInventoryStatus(?string $status): bool
+{
+    $unavailableStatuses = [
+        'sold',
+        'sold out',
+        'released',
+        'reserved',
+        'unavailable',
+    ];
+
+    return in_array(normalizeInventoryStatus($status), $unavailableStatuses, true);
+}
+
 if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
     respond(405, [
         'success' => false,
@@ -75,6 +93,13 @@ try {
         ]);
     }
 
+    if (!isset($pdo) || !($pdo instanceof PDO)) {
+        respond(500, [
+            'success' => false,
+            'message' => 'PDO missing.',
+        ]);
+    }
+
     $pdo->beginTransaction();
 
     /*
@@ -106,23 +131,24 @@ try {
     }
 
     /*
-      Lock the item row.
+      Lock the inventory row before checking stock.
       This prevents two customers from buying the same item at the same time.
     */
     $itemStmt = $pdo->prepare("
-        SELECT *
+        SELECT
+            id,
+            tenant_id,
+            item_name,
+            item_category,
+            item_photo_path,
+            display_price,
+            appraisal_value,
+            stock_qty,
+            status,
+            is_shop_visible
         FROM item_inventory
         WHERE id = ?
           AND tenant_id = ?
-          AND is_shop_visible = 1
-          AND COALESCE(stock_qty, 0) > 0
-          AND LOWER(TRIM(COALESCE(status, ''))) NOT IN (
-              'sold',
-              'sold out',
-              'released',
-              'reserved',
-              'unavailable'
-          )
         LIMIT 1
         FOR UPDATE
     ");
@@ -134,23 +160,26 @@ try {
 
     $item = $itemStmt->fetch(PDO::FETCH_ASSOC);
 
-    if (!$item) {
+    if (!$item || intval($item['is_shop_visible'] ?? 0) !== 1) {
         $pdo->rollBack();
 
         respond(409, [
             'success' => false,
-            'message' => 'Sorry, this item is already sold out or no longer available.',
+            'message' => 'Sorry, this item is no longer available.',
         ]);
     }
 
     $stockQty = intval($item['stock_qty'] ?? 0);
+    $itemStatus = normalizeInventoryStatus((string)($item['status'] ?? ''));
 
-    if ($stockQty < 1) {
+    if ($stockQty < $quantity || isUnavailableInventoryStatus($itemStatus)) {
         $pdo->rollBack();
 
         respond(409, [
             'success' => false,
             'message' => 'Sorry, this item is already sold out or no longer available.',
+            'stock_qty' => $stockQty,
+            'status' => $itemStatus,
         ]);
     }
 
@@ -176,8 +205,8 @@ try {
     $totalAmount = $subtotal + $shippingFee + $taxAmount - $discountAmount;
 
     /*
-      Mark item as sold immediately.
-      This hides the item from the shop for all customers in the same tenant.
+      Mark item as sold immediately inside this transaction.
+      If PayMongo checkout creation fails, the transaction rolls back.
     */
     $markSoldStmt = $pdo->prepare("
         UPDATE item_inventory
@@ -191,7 +220,7 @@ try {
         WHERE id = ?
           AND tenant_id = ?
           AND is_shop_visible = 1
-          AND COALESCE(stock_qty, 0) > 0
+          AND COALESCE(stock_qty, 0) >= ?
           AND LOWER(TRIM(COALESCE(status, ''))) NOT IN (
               'sold',
               'sold out',
@@ -205,6 +234,7 @@ try {
         $totalAmount,
         $productId,
         $tenantId,
+        $quantity,
     ]);
 
     if ($markSoldStmt->rowCount() !== 1) {
@@ -357,6 +387,15 @@ try {
 
     $amountInCentavos = intval(round($totalAmount * 100));
 
+    if ($amountInCentavos <= 0) {
+        $pdo->rollBack();
+
+        respond(400, [
+            'success' => false,
+            'message' => 'Invalid payment amount.',
+        ]);
+    }
+
     $successUrl = buildUrlWithQuery(PAYMONGO_SUCCESS_URL, [
         'type' => 'shop',
         'tenant_id' => $tenantId,
@@ -422,11 +461,11 @@ try {
             'Accept: application/json',
             'Authorization: Basic ' . base64_encode(PAYMONGO_SECRET_KEY . ':'),
         ],
-        CURLOPT_POSTFIELDS => json_encode($payload),
+        CURLOPT_POSTFIELDS => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
     ]);
 
     $rawResponse = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $httpCode = intval(curl_getinfo($ch, CURLINFO_HTTP_CODE));
     $curlError = curl_error($ch);
 
     curl_close($ch);
@@ -443,10 +482,20 @@ try {
 
     $response = json_decode((string)$rawResponse, true);
 
+    if (!is_array($response)) {
+        $pdo->rollBack();
+
+        respond(500, [
+            'success' => false,
+            'message' => 'Invalid PayMongo response.',
+            'raw_response' => $rawResponse,
+        ]);
+    }
+
     if ($httpCode < 200 || $httpCode >= 300) {
         $pdo->rollBack();
 
-        respond($httpCode, [
+        respond($httpCode > 0 ? $httpCode : 500, [
             'success' => false,
             'message' => $response['errors'][0]['detail'] ?? 'PayMongo checkout creation failed.',
             'paymongo_response' => $response,
