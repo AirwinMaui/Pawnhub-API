@@ -374,8 +374,8 @@ try {
         ]);
     }
 
-    $interestAmount = round($offerAmount * ($interestRate / 100), 2);
-    $totalRedeem = round($offerAmount + $interestAmount, 2);
+   $interestAmount = round($offerAmount * $interestRate, 2);
+$totalRedeem = round($offerAmount + $interestAmount, 2);
 
     $dates = calculateDates($request['claim_term'] ?? null);
 
