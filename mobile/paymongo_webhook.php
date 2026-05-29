@@ -517,31 +517,32 @@ try {
     ]);
  
     try {
-        $paymentStmt = $pdo->prepare("
-            INSERT INTO pawn_payments (
-                tenant_id,
-                pawn_transaction_id,
-                ticket_no,
-                customer_id,
-                customer_name,
-                contact_number,
-                payment_amount,
-                payment_method,
-                notes,
-                created_at
-            ) VALUES (
-                :tenant_id,
-                :pawn_transaction_id,
-                :ticket_no,
-                :customer_id,
-                :customer_name,
-                :contact_number,
-                :payment_amount,
-                :payment_method,
-                :notes,
-                NOW()
-            )
-        ");
+    $paymentStmt = $pdo->prepare("
+        INSERT INTO pawn_payments (
+            tenant_id,
+            pawn_transaction_id,
+            ticket_no,
+            customer_id,
+            customer_name,
+            contact_number,
+            payment_amount,
+            payment_method,
+            notes,
+            created_at
+        ) VALUES (
+            :tenant_id,
+            :pawn_transaction_id,
+            :ticket_no,
+            :customer_id,
+            :customer_name,
+            :contact_number,
+            :payment_amount,
+            :payment_method,
+            :notes,
+            NOW()
+        )
+    ");
+
  
         $paymentStmt->execute([
             ':tenant_id' => $tenantId,
