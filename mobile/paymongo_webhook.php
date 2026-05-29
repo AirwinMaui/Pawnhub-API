@@ -398,6 +398,9 @@ try {
     $customerId = (int)($metadata['customer_id'] ?? 0);
     $ticketNo = trim((string)($metadata['ticket_no'] ?? ''));
     $paymentAmount = (float)($metadata['payment_amount'] ?? 0);
+    $paymentMethod = strtolower(
+    trim((string)($metadata['payment_method'] ?? 'paymongo'))
+    );
  
     if ($tenantId <= 0 || $customerId <= 0 || $ticketNo === '' || $sessionId === '') {
         respond(400, [
@@ -491,25 +494,87 @@ try {
         $paymentAmount = $totalRedeem;
     }
  
-    if ($totalRedeem > 0 && $paymentAmount < $totalRedeem) {
-        $pdo->rollBack();
+    if (
+    $paymentMethod === 'paymongo' &&
+    $totalRedeem > 0 &&
+    $paymentAmount < $totalRedeem
+) {
+    $pdo->rollBack();
+
+    respond(400, [
+        'success' => false,
+        'message' => 'PayMongo amount is less than total redeem amount.'
+    ]);
+}
  
-        respond(400, [
-            'success' => false,
-            'message' => 'PayMongo amount is less than total redeem amount.',
-            'required_amount' => $totalRedeem,
-            'payment_amount' => $paymentAmount,
-            'ticket_no' => $ticketNo,
+    switch ($paymentMethod) {
+
+    case 'extension':
+
+        $currentMaturity = $transaction['maturity_date'];
+
+        $newMaturity = date(
+            'Y-m-d',
+            strtotime('+30 days', strtotime($currentMaturity))
+        );
+
+        $updateStmt = $pdo->prepare("
+            UPDATE pawn_transactions
+            SET maturity_date = :maturity_date,
+                updated_at = NOW()
+            WHERE id = :id
+              AND tenant_id = :tenant_id
+        ");
+
+        $updateStmt->execute([
+            ':maturity_date' => $newMaturity,
+            ':id' => $transaction['id'],
+            ':tenant_id' => $tenantId
         ]);
-    }
- 
-    $updateStmt = $pdo->prepare("
-        UPDATE pawn_transactions
-        SET status = 'paid',
-            updated_at = NOW()
-        WHERE id = :id
-          AND tenant_id = :tenant_id
-    ");
+
+        break;
+
+    case 'partial':
+
+        $newBalance =
+            max(
+                0,
+                ((float)$transaction['total_redeem']) - $paymentAmount
+            );
+
+        $updateStmt = $pdo->prepare("
+            UPDATE pawn_transactions
+            SET total_redeem = :balance,
+                updated_at = NOW()
+            WHERE id = :id
+              AND tenant_id = :tenant_id
+        ");
+
+        $updateStmt->execute([
+            ':balance' => $newBalance,
+            ':id' => $transaction['id'],
+            ':tenant_id' => $tenantId
+        ]);
+
+        break;
+
+    default:
+
+        $updateStmt = $pdo->prepare("
+            UPDATE pawn_transactions
+            SET status = 'paid',
+                updated_at = NOW()
+            WHERE id = :id
+              AND tenant_id = :tenant_id
+        ");
+
+        $updateStmt->execute([
+            ':id' => $transaction['id'],
+            ':tenant_id' => $tenantId
+        ]);
+
+        break;
+}
  
     $updateStmt->execute([
         ':id' => $transaction['id'],
@@ -517,47 +582,49 @@ try {
     ]);
  
     try {
+
     $paymentStmt = $pdo->prepare("
-        INSERT INTO pawn_payments (
+        INSERT INTO payment_transactions (
             tenant_id,
-            pawn_transaction_id,
             ticket_no,
-            customer_id,
-            customer_name,
-            contact_number,
-            payment_amount,
-            payment_method,
-            notes,
+            action,
+            or_no,
+            amount_due,
+            cash_received,
+            change_amount,
+            staff_user_id,
+            staff_username,
+            staff_role,
             created_at
         ) VALUES (
             :tenant_id,
-            :pawn_transaction_id,
             :ticket_no,
-            :customer_id,
-            :customer_name,
-            :contact_number,
-            :payment_amount,
-            :payment_method,
-            :notes,
+            :action,
+            :or_no,
+            :amount_due,
+            :cash_received,
+            0,
+            0,
+            'PayMongo',
+            'system',
             NOW()
         )
     ");
 
- 
-        $paymentStmt->execute([
-            ':tenant_id' => $tenantId,
-            ':pawn_transaction_id' => $transaction['id'],
-            ':ticket_no' => $ticketNo,
-            ':customer_id' => $customerId,
-            ':customer_name' => $customer['full_name'],
-            ':contact_number' => $customer['contact_number'],
-            ':payment_amount' => $paymentAmount,
-            ':payment_method' => 'paymongo',
-            ':notes' => 'PayMongo Checkout Session: ' . $sessionId,
-        ]);
-    } catch (Throwable $ignored) {
-        // Ignore if pawn_payments table does not exist or has a different schema.
-    }
+    $paymentStmt->execute([
+        ':tenant_id' => $tenantId,
+        ':ticket_no' => $ticketNo,
+        ':action' => $paymentMethod === 'extension'
+            ? 'renew'
+            : 'release',
+        ':or_no' => $sessionId,
+        ':amount_due' => $paymentAmount,
+        ':cash_received' => $paymentAmount
+    ]);
+
+} catch (Throwable $e) {
+    error_log($e->getMessage());
+}
  
     try {
         $logStmt = $pdo->prepare("
