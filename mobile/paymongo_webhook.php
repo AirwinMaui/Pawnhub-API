@@ -12,7 +12,8 @@ header('Content-Type: application/json; charset=UTF-8');
  
 require_once dirname(__DIR__) . '/db.php';
 require_once __DIR__ . '/paymongo_config.php';
- 
+require_once dirname(__DIR__) . '/mailer.php';
+
 function respond(int $statusCode, array $payload): void
 {
     if (ob_get_length()) {
@@ -273,6 +274,45 @@ try {
         }
  
         $pdo->commit();
+
+
+
+        try {
+
+    $customerStmt = $pdo->prepare("
+        SELECT full_name, email
+        FROM mobile_customers
+        WHERE id = ?
+        LIMIT 1
+    ");
+
+    $customerStmt->execute([$customerId]);
+
+    $customerData = $customerStmt->fetch(PDO::FETCH_ASSOC);
+
+    if (
+        $customerData &&
+        !empty($customerData['email'])
+    ) {
+
+        sendPaymentReceipt(
+            $customerData['email'],
+            $customerData['full_name'],
+            $sessionId,
+            "Shop Purchase Order #{$orderId}",
+            (float)$paymentAmount
+        );
+
+    }
+
+} catch (Throwable $mailErr) {
+
+    error_log(
+        '[Webhook] Shop receipt email error: ' .
+        $mailErr->getMessage()
+    );
+
+}
  
         // ── Notify tenant admin + managers of shop sale ───────
         try {
@@ -551,14 +591,43 @@ try {
     }
  
     $pdo->commit();
- 
-    respond(200, [
-        'success' => true,
-        'message' => 'Loan marked as paid from PayMongo webhook.',
-        'ticket_no' => $ticketNo,
-        'session_id' => $sessionId,
-        'payment_amount' => $paymentAmount,
-    ]);
+
+try {
+
+    $customerStmt = $pdo->prepare("
+        SELECT full_name, email
+        FROM mobile_customers
+        WHERE id = ?
+        LIMIT 1
+    ");
+
+    $customerStmt->execute([$customerId]);
+    $customerData = $customerStmt->fetch(PDO::FETCH_ASSOC);
+
+    if ($customerData && !empty($customerData['email'])) {
+
+        sendPaymentReceipt(
+            $customerData['email'],
+            $customerData['full_name'],
+            $sessionId,
+            "Pawn Loan Payment - Ticket {$ticketNo}",
+            (float)$paymentAmount
+        );
+    }
+
+} catch (Throwable $mailErr) {
+
+    error_log(
+        '[Webhook] Pawn receipt email error: ' .
+        $mailErr->getMessage()
+    );
+}
+
+respond(200, [
+    'success' => true,
+    'message' => 'Loan marked as paid from PayMongo webhook.',
+    // KEEP EVERYTHING THAT WAS ALREADY HERE
+]);
 } catch (Throwable $e) {
     if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
         $pdo->rollBack();

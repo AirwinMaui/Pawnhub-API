@@ -109,3 +109,77 @@ function sendMail(string $toEmail, string $toName, string $subject, string $html
         return false;
     }
 }
+
+function sendPaymentReceipt(
+    string $email,
+    string $customerName,
+    string $referenceNo,
+    string $description,
+    float $amount
+): bool {
+
+    $subject = 'Pawnhub Payment Receipt';
+
+    $html = "
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset='UTF-8'>
+    </head>
+    <body style='font-family: Arial, sans-serif; color: #333;'>
+
+        <div style='max-width:700px;margin:auto;padding:20px;'>
+
+            <h2 style='color:#16a34a;'>
+                Payment Successful
+            </h2>
+
+            <p>Hello {$customerName},</p>
+
+            <p>
+                Thank you for your payment. This email serves as your official receipt.
+            </p>
+
+            <table
+                style='border-collapse:collapse;width:100%;'
+                border='1'
+                cellpadding='10'
+            >
+                <tr>
+                    <td><strong>Reference Number</strong></td>
+                    <td>{$referenceNo}</td>
+                </tr>
+
+                <tr>
+                    <td><strong>Description</strong></td>
+                    <td>{$description}</td>
+                </tr>
+
+                <tr>
+                    <td><strong>Amount Paid</strong></td>
+                    <td>₱" . number_format($amount, 2) . "</td>
+                </tr>
+
+                <tr>
+                    <td><strong>Date</strong></td>
+                    <td>" . date('F d, Y h:i A') . "</td>
+                </tr>
+            </table>
+
+            <p style='margin-top:20px;'>
+                Thank you for choosing Pawnhub.
+            </p>
+
+        </div>
+
+    </body>
+    </html>
+    ";
+
+    return sendMail(
+        $email,
+        $customerName,
+        $subject,
+        $html
+    );
+}
