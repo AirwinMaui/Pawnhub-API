@@ -14,13 +14,13 @@ if (!$input) {
     exit;
 }
 
-$tenantId      = intval($input['tenant_id']      ?? 0);
-$customerId    = intval($input['customer_id']    ?? 0);
-$ticketNo      = trim($input['ticket_no']        ?? '');
+$tenantId      = intval($input['tenant_id']        ?? 0);
+$customerId    = intval($input['customer_id']      ?? 0);
+$ticketNo      = trim($input['ticket_no']          ?? '');
 $paymentAmount = floatval($input['payment_amount'] ?? 0);
 $paymentMethod = strtolower(trim($input['payment_method'] ?? 'paymongo'));
-$customerName  = trim($input['customer_name']    ?? '');
-$notes         = trim($input['notes']            ?? '');
+$customerName  = trim($input['customer_name']      ?? '');
+$notes         = trim($input['notes']              ?? '');
 
 $allowedMethods = ['paymongo', 'partial', 'extension', 'cash'];
 if (!in_array($paymentMethod, $allowedMethods, true)) {
@@ -37,7 +37,6 @@ if (!$tenantId || !$customerId || !$ticketNo || $paymentAmount <= 0) {
 }
 
 try {
-    // Fetch the loan
     $stmt = $pdo->prepare("
         SELECT *
         FROM pawn_transactions
@@ -64,11 +63,29 @@ try {
         exit;
     }
 
-    $totalRedeem = floatval($loan['total_redeem'] ?? 0);
+    $totalRedeem    = floatval($loan['total_redeem']    ?? 0);
+    $loanAmount     = floatval($loan['loan_amount']     ?? 0);
+    $interestRate   = floatval($loan['interest_rate']   ?? 0);
+    $interestAmount = floatval($loan['interest_amount'] ?? 0);
 
-    // ── Validate per payment method ───────────────────────────────
-    // Only full payment needs to meet or exceed total_redeem.
-    // Partial (installment) and extension are intentionally less.
+    // For extension, use DB interest_amount as source of truth;
+    // fall back to rate x principal if not stored.
+    if ($paymentMethod === 'extension') {
+        $expectedInterest = $interestAmount > 0
+            ? $interestAmount
+            : round($loanAmount * $interestRate, 2);
+
+        if ($expectedInterest <= 0) {
+            http_response_code(400);
+            echo json_encode([
+                'success' => false,
+                'message' => 'Cannot determine interest amount for extension.',
+            ]);
+            exit;
+        }
+    }
+
+    // Only full payments must cover the entire balance.
     if (
         in_array($paymentMethod, ['paymongo', 'cash'], true) &&
         $totalRedeem > 0 &&
@@ -87,28 +104,32 @@ try {
     switch ($paymentMethod) {
 
         case 'extension':
-            // Extend maturity by 30 days; loan stays active.
-            $currentMaturity = $loan['maturity_date'];
-            $newMaturity     = date('Y-m-d', strtotime('+30 days', strtotime($currentMaturity)));
+            // 1. Deduct the interest paid from the outstanding balance.
+            $newBalance  = max(0, $totalRedeem - $paymentAmount);
+            // 2. Extend maturity by 30 days from the current maturity date.
+            $newMaturity = date('Y-m-d', strtotime('+30 days', strtotime($loan['maturity_date'])));
 
             $pdo->prepare("
                 UPDATE pawn_transactions
-                SET maturity_date = :maturity_date,
+                SET total_redeem  = :balance,
+                    maturity_date = :maturity_date,
                     updated_at    = NOW()
                 WHERE id        = :id
                   AND tenant_id = :tenant_id
             ")->execute([
+                ':balance'       => $newBalance,
                 ':maturity_date' => $newMaturity,
                 ':id'            => $loan['id'],
                 ':tenant_id'     => $tenantId,
             ]);
 
-            $successMessage = "Loan ticket #{$ticketNo} extended to {$newMaturity}.";
-            $action         = 'renew';
+            $successMessage = "Loan #{$ticketNo} extended to {$newMaturity}. "
+                . "Interest of \xE2\x82\xB1" . number_format($paymentAmount, 2) . " deducted. "
+                . "Remaining balance: \xE2\x82\xB1" . number_format($newBalance, 2) . ".";
+            $action = 'renew';
             break;
 
         case 'partial':
-            // Subtract installment from outstanding balance.
             $newBalance = max(0, $totalRedeem - $paymentAmount);
 
             $pdo->prepare("
@@ -123,9 +144,9 @@ try {
                 ':tenant_id' => $tenantId,
             ]);
 
-            $successMessage = "Installment of ₱" . number_format($paymentAmount, 2) .
-                              " applied. Remaining balance: ₱" . number_format($newBalance, 2) . ".";
-            $action         = 'installment';
+            $successMessage = "Installment of \xE2\x82\xB1" . number_format($paymentAmount, 2) . " applied. "
+                . "Remaining balance: \xE2\x82\xB1" . number_format($newBalance, 2) . ".";
+            $action = 'installment';
             break;
 
         default: // 'paymongo' or 'cash' — full payment
@@ -141,7 +162,7 @@ try {
             ]);
 
             $successMessage = "Loan ticket #{$ticketNo} marked as paid.";
-            $action         = 'release';
+            $action = 'release';
             break;
     }
 
@@ -170,7 +191,7 @@ try {
             ':notes'          => $notes ?: $successMessage,
         ]);
     } catch (Throwable $e) {
-        error_log('[mobile_pay_loan] payment_transactions insert error: ' . $e->getMessage());
+        error_log('[mobile_pay_loan] payment_transactions insert: ' . $e->getMessage());
     }
 
     $pdo->commit();
@@ -187,12 +208,7 @@ try {
     if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
-
     error_log('[mobile_pay_loan] error: ' . $e->getMessage());
-
     http_response_code(500);
-    echo json_encode([
-        'success' => false,
-        'message' => 'Server error: ' . $e->getMessage(),
-    ]);
+    echo json_encode(['success' => false, 'message' => 'Server error: ' . $e->getMessage()]);
 }
