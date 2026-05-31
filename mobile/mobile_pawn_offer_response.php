@@ -264,26 +264,35 @@ try {
     }
 
     if ($action === 'decline') {
-        $rejectStmt = $pdo->prepare("
-            UPDATE pawn_requests
-            SET status = 'rejected',
-                updated_at = NOW()
-            WHERE id = :id
-              AND tenant_id = :tenant_id
-        ");
+    $deleteStmt = $conn->prepare("
+        DELETE FROM pawn_requests
+        WHERE request_no = ?
+        AND customer_id = ?
+        AND tenant_id = ?
+        LIMIT 1
+    ");
 
-        $rejectStmt->execute([
-            ':id' => $request['id'],
-            ':tenant_id' => $tenantId,
+    $deleteStmt->bind_param(
+        "sii",
+        $request_no,
+        $customer_id,
+        $tenant_id
+    );
+
+    if (!$deleteStmt->execute()) {
+        echo json_encode([
+            "success" => false,
+            "message" => "Failed to delete declined offer."
         ]);
-
-        $pdo->commit();
-
-        respond(200, [
-            'success' => true,
-            'message' => 'Offer rejected successfully',
-        ]);
+        exit;
     }
+
+    echo json_encode([
+        "success" => true,
+        "message" => "Offer declined and removed."
+    ]);
+    exit;
+}
 
     $existingStmt = $pdo->prepare("
         SELECT id, ticket_no
