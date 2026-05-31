@@ -263,35 +263,30 @@ try {
         ]);
     }
 
-    if ($action === 'decline') {
-    $deleteStmt = $conn->prepare("
+if ($action === 'decline') {
+    $deleteStmt = $pdo->prepare("
         DELETE FROM pawn_requests
-        WHERE request_no = ?
-        AND customer_id = ?
-        AND tenant_id = ?
+        WHERE id = :id
+          AND tenant_id = :tenant_id
+          AND customer_id = :customer_id
+          AND request_no = :request_no
         LIMIT 1
     ");
 
-    $deleteStmt->bind_param(
-        "sii",
-        $request_no,
-        $customer_id,
-        $tenant_id
-    );
-
-    if (!$deleteStmt->execute()) {
-        echo json_encode([
-            "success" => false,
-            "message" => "Failed to delete declined offer."
-        ]);
-        exit;
-    }
-
-    echo json_encode([
-        "success" => true,
-        "message" => "Offer declined and removed."
+    $deleteStmt->execute([
+        ':id' => $request['id'],
+        ':tenant_id' => $tenantId,
+        ':customer_id' => $customerId,
+        ':request_no' => $requestNo,
     ]);
-    exit;
+
+    $pdo->commit();
+
+    respond(200, [
+        'success' => true,
+        'message' => 'Offer declined and removed.',
+        'request_no' => $requestNo,
+    ]);
 }
 
     $existingStmt = $pdo->prepare("
