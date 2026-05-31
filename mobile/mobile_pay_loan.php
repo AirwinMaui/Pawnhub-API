@@ -1,241 +1,198 @@
 <?php
-declare(strict_types=1);
+// mobile_pay_loan.php
 
-ob_start();
+header('Content-Type: application/json');
 
-ini_set('display_errors', '0');
-error_reporting(E_ALL);
+require_once dirname(__DIR__) . '/db.php';
 
-header('Content-Type: application/json; charset=UTF-8');
-header('Access-Control-Allow-Origin: *');
-header('Access-Control-Allow-Headers: Content-Type, Authorization');
-header('Access-Control-Allow-Methods: POST, OPTIONS');
+$rawInput = file_get_contents('php://input');
+$input    = json_decode($rawInput, true);
 
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(204);
+if (!$input) {
+    http_response_code(400);
+    echo json_encode(['success' => false, 'message' => 'Invalid JSON body.']);
     exit;
 }
 
-require_once __DIR__ . '/../db.php';
+$tenantId      = intval($input['tenant_id']      ?? 0);
+$customerId    = intval($input['customer_id']    ?? 0);
+$ticketNo      = trim($input['ticket_no']        ?? '');
+$paymentAmount = floatval($input['payment_amount'] ?? 0);
+$paymentMethod = strtolower(trim($input['payment_method'] ?? 'paymongo'));
+$customerName  = trim($input['customer_name']    ?? '');
+$notes         = trim($input['notes']            ?? '');
 
-function respond(int $statusCode, array $payload): void
-{
-    if (ob_get_length()) {
-        ob_clean();
-    }
-
-    http_response_code($statusCode);
-    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-    exit;
+$allowedMethods = ['paymongo', 'partial', 'extension', 'cash'];
+if (!in_array($paymentMethod, $allowedMethods, true)) {
+    $paymentMethod = 'paymongo';
 }
 
-if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-    respond(405, [
+if (!$tenantId || !$customerId || !$ticketNo || $paymentAmount <= 0) {
+    http_response_code(400);
+    echo json_encode([
         'success' => false,
-        'message' => 'Method not allowed',
+        'message' => 'Missing required fields: tenant_id, customer_id, ticket_no, payment_amount.',
     ]);
+    exit;
 }
 
 try {
-    $raw = file_get_contents('php://input');
-    $data = json_decode($raw, true);
-
-    if (!is_array($data)) {
-        respond(400, [
-            'success' => false,
-            'message' => 'Invalid JSON body',
-        ]);
-    }
-
-    $customerId = (int)($data['customer_id'] ?? $data['customerId'] ?? 0);
-    $tenantId = (int)($data['tenant_id'] ?? $data['tenantId'] ?? 0);
-    $ticketNo = trim((string)($data['ticket_no'] ?? $data['ticketNo'] ?? ''));
-    $paymentAmount = (float)($data['payment_amount'] ?? $data['paymentAmount'] ?? 0);
-    $paymentMethod = trim((string)($data['payment_method'] ?? $data['paymentMethod'] ?? 'cash'));
-    $notes = trim((string)($data['notes'] ?? ''));
-
-    if ($customerId <= 0 || $tenantId <= 0 || $ticketNo === '') {
-        respond(400, [
-            'success' => false,
-            'message' => 'Missing customer_id, tenant_id, or ticket_no',
-            'received' => $data,
-        ]);
-    }
-
-    $pdo->beginTransaction();
-
-    $customerStmt = $pdo->prepare("
-        SELECT id, tenant_id, full_name, contact_number
-        FROM mobile_customers
-        WHERE id = :customer_id
-          AND tenant_id = :tenant_id
-          AND is_active = 1
-        LIMIT 1
-    ");
-
-    $customerStmt->execute([
-        ':customer_id' => $customerId,
-        ':tenant_id' => $tenantId,
-    ]);
-
-    $customer = $customerStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$customer) {
-        $pdo->rollBack();
-
-        respond(404, [
-            'success' => false,
-            'message' => 'Customer not found',
-            'debug' => [
-                'customer_id' => $customerId,
-                'tenant_id' => $tenantId,
-            ],
-        ]);
-    }
-
-    $transactionStmt = $pdo->prepare("
+    // Fetch the loan
+    $stmt = $pdo->prepare("
         SELECT *
         FROM pawn_transactions
         WHERE tenant_id = :tenant_id
           AND ticket_no = :ticket_no
-          AND (
-                customer_id = :customer_id
-                OR contact_number = :contact_number
-              )
         LIMIT 1
-        FOR UPDATE
     ");
-
-    $transactionStmt->execute([
+    $stmt->execute([
         ':tenant_id' => $tenantId,
         ':ticket_no' => $ticketNo,
-        ':customer_id' => $customerId,
-        ':contact_number' => $customer['contact_number'],
     ]);
+    $loan = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    $transaction = $transactionStmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$transaction) {
-        $pdo->rollBack();
-
-        respond(404, [
-            'success' => false,
-            'message' => 'Loan not found for this customer',
-            'debug' => [
-                'ticket_no' => $ticketNo,
-                'customer_id' => $customerId,
-                'contact_number' => $customer['contact_number'],
-            ],
-        ]);
+    if (!$loan) {
+        http_response_code(404);
+        echo json_encode(['success' => false, 'message' => 'Loan not found.']);
+        exit;
     }
 
-    $currentStatus = strtolower((string)($transaction['status'] ?? ''));
+    $currentStatus = strtolower((string)($loan['status'] ?? ''));
 
     if (in_array($currentStatus, ['paid', 'redeemed', 'closed', 'completed'], true)) {
-        $pdo->commit();
-
-        respond(200, [
-            'success' => true,
-            'message' => 'Loan is already paid',
-            'ticket_no' => $ticketNo,
-        ]);
+        echo json_encode(['success' => true, 'message' => 'Loan is already paid.']);
+        exit;
     }
 
-    $totalRedeem = (float)($transaction['total_redeem'] ?? 0);
+    $totalRedeem = floatval($loan['total_redeem'] ?? 0);
 
-    if ($paymentAmount <= 0) {
-        $paymentAmount = $totalRedeem;
-    }
-
-    if ($totalRedeem > 0 && $paymentAmount < $totalRedeem) {
-        $pdo->rollBack();
-
-        respond(400, [
+    // ── Validate per payment method ───────────────────────────────
+    // Only full payment needs to meet or exceed total_redeem.
+    // Partial (installment) and extension are intentionally less.
+    if (
+        in_array($paymentMethod, ['paymongo', 'cash'], true) &&
+        $totalRedeem > 0 &&
+        $paymentAmount < $totalRedeem
+    ) {
+        http_response_code(400);
+        echo json_encode([
             'success' => false,
-            'message' => 'Payment amount is less than total redeem amount',
-            'required_amount' => $totalRedeem,
-            'payment_amount' => $paymentAmount,
+            'message' => 'Payment amount is less than total redeem amount.',
         ]);
+        exit;
     }
 
-    $updateStmt = $pdo->prepare("
-        UPDATE pawn_transactions
-        SET status = 'paid',
-            updated_at = NOW()
-        WHERE id = :id
-          AND tenant_id = :tenant_id
-    ");
+    $pdo->beginTransaction();
 
-    $updateStmt->execute([
-        ':id' => $transaction['id'],
-        ':tenant_id' => $tenantId,
-    ]);
+    switch ($paymentMethod) {
 
-    /*
-     * Optional payment history insert.
-     * This will only run if you have a pawn_payments table.
-     */
+        case 'extension':
+            // Extend maturity by 30 days; loan stays active.
+            $currentMaturity = $loan['maturity_date'];
+            $newMaturity     = date('Y-m-d', strtotime('+30 days', strtotime($currentMaturity)));
+
+            $pdo->prepare("
+                UPDATE pawn_transactions
+                SET maturity_date = :maturity_date,
+                    updated_at    = NOW()
+                WHERE id        = :id
+                  AND tenant_id = :tenant_id
+            ")->execute([
+                ':maturity_date' => $newMaturity,
+                ':id'            => $loan['id'],
+                ':tenant_id'     => $tenantId,
+            ]);
+
+            $successMessage = "Loan ticket #{$ticketNo} extended to {$newMaturity}.";
+            $action         = 'renew';
+            break;
+
+        case 'partial':
+            // Subtract installment from outstanding balance.
+            $newBalance = max(0, $totalRedeem - $paymentAmount);
+
+            $pdo->prepare("
+                UPDATE pawn_transactions
+                SET total_redeem = :balance,
+                    updated_at   = NOW()
+                WHERE id        = :id
+                  AND tenant_id = :tenant_id
+            ")->execute([
+                ':balance'   => $newBalance,
+                ':id'        => $loan['id'],
+                ':tenant_id' => $tenantId,
+            ]);
+
+            $successMessage = "Installment of ₱" . number_format($paymentAmount, 2) .
+                              " applied. Remaining balance: ₱" . number_format($newBalance, 2) . ".";
+            $action         = 'installment';
+            break;
+
+        default: // 'paymongo' or 'cash' — full payment
+            $pdo->prepare("
+                UPDATE pawn_transactions
+                SET status     = 'paid',
+                    updated_at = NOW()
+                WHERE id        = :id
+                  AND tenant_id = :tenant_id
+            ")->execute([
+                ':id'        => $loan['id'],
+                ':tenant_id' => $tenantId,
+            ]);
+
+            $successMessage = "Loan ticket #{$ticketNo} marked as paid.";
+            $action         = 'release';
+            break;
+    }
+
+    // Log to payment_transactions
     try {
-        $paymentStmt = $pdo->prepare("
-            INSERT INTO pawn_payments (
-                tenant_id,
-                pawn_transaction_id,
-                ticket_no,
-                customer_id,
-                customer_name,
-                contact_number,
-                payment_amount,
-                payment_method,
-                notes,
-                created_at
+        $pdo->prepare("
+            INSERT INTO payment_transactions (
+                tenant_id, ticket_no, action,
+                or_no, amount_due, cash_received, change_amount,
+                staff_user_id, staff_username, staff_role,
+                notes, created_at
             ) VALUES (
-                :tenant_id,
-                :pawn_transaction_id,
-                :ticket_no,
-                :customer_id,
-                :customer_name,
-                :contact_number,
-                :payment_amount,
-                :payment_method,
-                :notes,
-                NOW()
+                :tenant_id, :ticket_no, :action,
+                :or_no, :amount_due, :cash_received, 0,
+                0, :staff_username, 'system',
+                :notes, NOW()
             )
-        ");
-
-        $paymentStmt->execute([
-            ':tenant_id' => $tenantId,
-            ':pawn_transaction_id' => $transaction['id'],
-            ':ticket_no' => $ticketNo,
-            ':customer_id' => $customerId,
-            ':customer_name' => $customer['full_name'],
-            ':contact_number' => $customer['contact_number'],
-            ':payment_amount' => $paymentAmount,
-            ':payment_method' => $paymentMethod,
-            ':notes' => $notes,
+        ")->execute([
+            ':tenant_id'      => $tenantId,
+            ':ticket_no'      => $ticketNo,
+            ':action'         => $action,
+            ':or_no'          => 'MOBILE-' . strtoupper($paymentMethod) . '-' . time(),
+            ':amount_due'     => $paymentAmount,
+            ':cash_received'  => $paymentAmount,
+            ':staff_username' => $paymentMethod === 'cash' ? 'Cash Payment' : 'PayMongo',
+            ':notes'          => $notes ?: $successMessage,
         ]);
-    } catch (Throwable $ignored) {
-        /*
-         * Ignore if pawn_payments table does not exist.
-         * The loan status update is still valid.
-         */
+    } catch (Throwable $e) {
+        error_log('[mobile_pay_loan] payment_transactions insert error: ' . $e->getMessage());
     }
 
     $pdo->commit();
 
-    respond(200, [
-        'success' => true,
-        'message' => 'Loan paid successfully',
-        'ticket_no' => $ticketNo,
+    echo json_encode([
+        'success'        => true,
+        'message'        => $successMessage,
+        'ticket_no'      => $ticketNo,
+        'payment_method' => $paymentMethod,
         'payment_amount' => $paymentAmount,
     ]);
+
 } catch (Throwable $e) {
-    if (isset($pdo) && $pdo instanceof PDO && $pdo->inTransaction()) {
+    if (isset($pdo) && $pdo->inTransaction()) {
         $pdo->rollBack();
     }
 
-    respond(500, [
+    error_log('[mobile_pay_loan] error: ' . $e->getMessage());
+
+    http_response_code(500);
+    echo json_encode([
         'success' => false,
-        'message' => 'Server error',
-        'error' => $e->getMessage(),
+        'message' => 'Server error: ' . $e->getMessage(),
     ]);
 }
